@@ -1,0 +1,40 @@
+# Normalize text to LF in the repo. Checkout stays LF on every OS
+# (Windows, macOS, Linux) so Python, shells, and CI see the same files.
+* text=auto eol=lf
+
+*.py     text eol=lf
+*.pyi    text eol=lf
+*.toml   text eol=lf
+*.cfg    text eol=lf
+*.md     text eol=lf
+*.json   text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.txt    text eol=lf
+*.sh     text eol=lf
+
+# Lockfiles are generated: keep diffs out of review noise
+uv.lock  text eol=lf -diff linguist-generated
+
+# Notebooks are JSON, but merging them by hand is a trap
+*.ipynb  text eol=lf -merge
+
+# Windows scripts keep CRLF
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
+*.ps1    text eol=crlf
+
+# Binaries
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.pdf    binary
+*.pyc    binary
+*.so     binary
+*.dylib  binary
+*.dll    binary
+*.faiss  binary
+*.sqlite binary
+*.db     binary

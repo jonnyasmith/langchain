@@ -1,0 +1,62 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Distribution / build
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments (uv puts one per module in .venv/)
+.venv/
+venv/
+env/
+
+# Coverage and profiles
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.prof
+
+# Env and secrets (API keys live here, never in git)
+.env
+.env.*
+!.env.example
+
+# Model and retrieval artifacts (rebuildable from source documents)
+.chroma/
+chroma_db/
+*.faiss
+*.index
+*.sqlite
+*.sqlite3
+*.db
+
+# Local notes (keep on disk, do not commit)
+/plan.md
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+*~
+.nfs*
+
+# Editors (keep .vscode/ settings that are committed)
+.idea/
+*.swp
+*.swo
+
+# Debug / local
+*.log
+tmp/
+temp/
