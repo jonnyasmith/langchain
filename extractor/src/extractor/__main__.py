@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import os
 import sys
@@ -42,66 +40,68 @@ def _real_model(model_id: str) -> BaseChatModel:
     return ChatOpenAI(model=model_id, reasoning_effort="none", temperature=0)
 
 
+def _report_refusal(error: OpenAIRefusalError) -> int:
+    sys.stderr.write(f"Refusal: {error}\n")
+    return 4
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
     stdin: TextIO = sys.stdin,
-    stdout: TextIO = sys.stdout,
-    stderr: TextIO = sys.stderr,
     model: BaseChatModel | None = None,
 ) -> int:
     args = _parser().parse_args(argv)
     if args.list_schemas:
-        stdout.write("\n".join(sorted(SCHEMAS)) + "\n")
+        sys.stdout.write("\n".join(sorted(SCHEMAS)) + "\n")
         return 0
     if args.schema is None or args.input is None:
-        stderr.write("Input error: --schema and an input path are required.\n")
+        sys.stderr.write("Input error: --schema and an input path are required.\n")
         return 1
     schema = SCHEMAS.get(args.schema)
     if schema is None:
         valid_names = ", ".join(sorted(SCHEMAS))
-        stderr.write(f"Unknown schema {args.schema!r}. Valid schemas: {valid_names}.\n")
+        sys.stderr.write(f"Unknown schema {args.schema!r}. Valid schemas: {valid_names}.\n")
         return 1
     try:
         document = (
             stdin.read() if args.input == "-" else Path(args.input).read_text(encoding="utf-8")
         )
     except OSError as error:
-        stderr.write(f"Input file error for {args.input!r}: {error.strerror or error}.\n")
+        sys.stderr.write(f"Input file error for {args.input!r}: {error.strerror or error}.\n")
         return 1
     document_size = len(document)
     if document_size > MAX_DOCUMENT_CHARACTERS:
-        stderr.write(
+        sys.stderr.write(
             "Document too large: "
             f"maximum is {MAX_DOCUMENT_CHARACTERS:,} characters; "
             f"received {document_size:,} characters.\n"
         )
         return 1
     try:
-        result = extract(document, schema, model or _real_model(args.model))
+        selected_model = model if model is not None else _real_model(args.model)
+        result = extract(document, schema, selected_model)
     except OpenAIRefusalError as error:
-        stderr.write(f"Refusal: {error}\n")
-        return 4
+        return _report_refusal(error)
     except ConfigurationError as error:
-        stderr.write(f"Configuration error: {error}\n")
+        sys.stderr.write(f"Configuration error: {error}\n")
         return 1
     except Exception as error:
-        stderr.write(f"Unexpected error: {error}\n")
+        sys.stderr.write(f"Unexpected error: {error}\n")
         return 1
     if args.debug:
-        stderr.write(f"Raw model message: {result['raw']!r}\n")
+        sys.stderr.write(f"Raw model message: {result['raw']!r}\n")
     parsing_error = result["parsing_error"]
     if isinstance(parsing_error, OpenAIRefusalError):
-        stderr.write(f"Refusal: {parsing_error}\n")
-        return 4
+        return _report_refusal(parsing_error)
     if parsing_error is not None:
-        stderr.write(f"Validation failure: {parsing_error}\n")
+        sys.stderr.write(f"Validation failure: {parsing_error}\n")
         return 2
     parsed = result["parsed"]
     if parsed is None:
-        stderr.write("Empty extraction: the model returned no object.\n")
+        sys.stderr.write("Empty extraction: the model returned no object.\n")
         return 3
-    stdout.write(parsed.model_dump_json() + "\n")
+    sys.stdout.write(parsed.model_dump_json() + "\n")
     return 0
 
 
