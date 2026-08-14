@@ -1,60 +1,24 @@
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from io import StringIO
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import NamedTuple, TextIO
 
 import pytest
-from langchain_core.callbacks.manager import CallbackManagerForLLMRun
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
-from langchain_core.runnables import Runnable
-from langchain_openai import ChatOpenAI
-from pydantic import SecretStr
+from pydantic import BaseModel, ValidationError
 
 from extractor.__main__ import main
-
-
-class ToolCallingFakeChatModel(BaseChatModel):
-    response: Any
-
-    @property
-    def _llm_type(self) -> str:
-        return "tool-calling-fake"
-
-    def bind_tools(
-        self,
-        tools: Sequence[dict[str, Any] | type | Any],
-        *,
-        tool_choice: str | None = None,
-        **kwargs: Any,
-    ) -> Runnable[Any, AIMessage]:
-        return self
-
-    def _generate(
-        self,
-        messages: list[BaseMessage],
-        stop: list[str] | None = None,
-        run_manager: CallbackManagerForLLMRun | None = None,
-        **kwargs: Any,
-    ) -> ChatResult:
-        if isinstance(self.response, Exception):
-            raise self.response
-        return ChatResult(generations=[ChatGeneration(message=self.response)])
-
-
-class RefusingOpenAIChatModel(ChatOpenAI):
-    response: AIMessage
-
-    def _generate(
-        self,
-        messages: list[BaseMessage],
-        stop: list[str] | None = None,
-        run_manager: CallbackManagerForLLMRun | None = None,
-        **kwargs: Any,
-    ) -> ChatResult:
-        return ChatResult(generations=[ChatGeneration(message=self.response)])
+from extractor.extraction import (
+    EmptyExtraction,
+    Extracted,
+    Extraction,
+    ExtractionPort,
+    PortFactory,
+    Refusal,
+    ValidationFailure,
+    build_openai_port,
+)
+from extractor.schemas import TermsOfService
 
 
 class CliResult(NamedTuple):
@@ -63,30 +27,54 @@ class CliResult(NamedTuple):
     stderr: str
 
 
+def staged_port(outcome: Extraction, *, raw: str = "") -> PortFactory:
+    """A port factory whose port always yields `outcome`, dumping `raw` when debugging."""
+
+    def factory(model_id: str, debug: TextIO | None) -> ExtractionPort:
+        def extract(document: str, schema: type[BaseModel]) -> Extraction:
+            if debug is not None:
+                debug.write(f"Raw model message: {raw!r}\n")
+            return outcome
+
+        return extract
+
+    return factory
+
+
+def failing_port(error: BaseException) -> PortFactory:
+    """A port factory whose port always raises `error`."""
+
+    def factory(model_id: str, debug: TextIO | None) -> ExtractionPort:
+        def extract(document: str, schema: type[BaseModel]) -> Extraction:
+            raise error
+
+        return extract
+
+    return factory
+
+
+UNUSED_PORT: PortFactory = failing_port(AssertionError("the provider must not be called"))
+
+
+def schema_rejection_detail(candidate: object) -> str:
+    """The real schema-rejection text for a candidate object, so assertions stay honest."""
+    try:
+        TermsOfService.model_validate(candidate)
+    except ValidationError as error:
+        return str(error)
+    raise AssertionError("the candidate object was accepted by the schema")
+
+
 def run_cli(
     capsys: pytest.CaptureFixture[str],
     argv: Sequence[str],
     *,
     source: str = "",
-    model: BaseChatModel | None = None,
+    port_factory: PortFactory = UNUSED_PORT,
 ) -> CliResult:
-    exit_code = main(argv, stdin=StringIO(source), model=model)
+    exit_code = main(argv, stdin=StringIO(source), port_factory=port_factory)
     captured = capsys.readouterr()
     return CliResult(exit_code, captured.out, captured.err)
-
-
-def tool_response(arguments: Mapping[str, object], *, content: str = "") -> AIMessage:
-    return AIMessage(
-        content=content,
-        tool_calls=[
-            {
-                "name": "TermsOfService",
-                "args": dict(arguments),
-                "id": "call-1",
-                "type": "tool_call",
-            }
-        ],
-    )
 
 
 def test_a_valid_extraction_is_the_only_stdout_and_exits_zero(
@@ -106,7 +94,7 @@ def test_a_valid_extraction_is_the_only_stdout_and_exits_zero(
         capsys,
         ["--schema", "tos", "-"],
         source="Terms of Service source",
-        model=ToolCallingFakeChatModel(response=tool_response(expected)),
+        port_factory=staged_port(Extracted(TermsOfService.model_validate(expected))),
     )
 
     assert result == CliResult(0, json.dumps(expected, separators=(",", ":")) + "\n", "")
@@ -129,7 +117,7 @@ def test_an_invalid_model_value_is_a_validation_failure(
         capsys,
         ["--schema", "tos", "-"],
         source="Terms of Service source",
-        model=ToolCallingFakeChatModel(response=tool_response(invalid)),
+        port_factory=staged_port(ValidationFailure(detail=schema_rejection_detail(invalid))),
     )
 
     assert result.exit_code == 2
@@ -145,7 +133,7 @@ def test_a_model_answer_without_an_object_is_an_empty_extraction(
         capsys,
         ["--schema", "tos", "-"],
         source="Terms of Service source",
-        model=ToolCallingFakeChatModel(response=AIMessage(content="No extracted facts")),
+        port_factory=staged_port(EmptyExtraction()),
     )
 
     assert result.exit_code == 3
@@ -156,20 +144,11 @@ def test_a_model_answer_without_an_object_is_an_empty_extraction(
 def test_a_provider_refusal_from_raw_parsing_is_reported_separately(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    model = RefusingOpenAIChatModel(
-        model="gpt-5-nano",
-        api_key=SecretStr("test-key"),
-        response=AIMessage(
-            content="",
-            additional_kwargs={"refusal": "The provider declined this extraction."},
-        ),
-    )
-
     result = run_cli(
         capsys,
         ["--schema", "tos", "-"],
         source="Terms of Service source",
-        model=model,
+        port_factory=staged_port(Refusal(detail="The provider declined this extraction.")),
     )
 
     assert result.exit_code == 4
@@ -185,7 +164,7 @@ def test_an_unexpected_provider_error_uses_the_generic_failure_exit(
         capsys,
         ["--schema", "tos", "-"],
         source="Terms of Service source",
-        model=ToolCallingFakeChatModel(response=ConnectionError("network unavailable")),
+        port_factory=failing_port(ConnectionError("network unavailable")),
     )
 
     assert result.exit_code == 1
@@ -211,8 +190,8 @@ def test_debug_dumps_the_raw_model_message_to_stderr(
         capsys,
         ["--debug", "--schema", "tos", "-"],
         source="Terms of Service source",
-        model=ToolCallingFakeChatModel(
-            response=tool_response(extracted, content="raw provider message")
+        port_factory=staged_port(
+            Extracted(TermsOfService.model_validate(extracted)), raw="raw provider message"
         ),
     )
 
@@ -236,7 +215,7 @@ def test_a_source_file_is_read_for_extraction(capsys: pytest.CaptureFixture[str]
     result = run_cli(
         capsys,
         ["--schema", "tos", str(fixture)],
-        model=ToolCallingFakeChatModel(response=tool_response(expected)),
+        port_factory=staged_port(Extracted(TermsOfService.model_validate(expected))),
     )
 
     assert result.exit_code == 0
@@ -253,12 +232,7 @@ def test_listing_schemas_needs_no_input_or_model(
 def test_an_unknown_schema_name_lists_valid_names(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    result = run_cli(
-        capsys,
-        ["--schema", "contract", "-"],
-        source="source",
-        model=ToolCallingFakeChatModel(response=AIMessage(content="unused")),
-    )
+    result = run_cli(capsys, ["--schema", "contract", "-"], source="source")
 
     assert result.exit_code == 1
     assert result.stdout == ""
@@ -271,11 +245,7 @@ def test_a_missing_input_file_is_reported_as_an_input_error(
 ) -> None:
     missing = tmp_path / "missing.html"
 
-    result = run_cli(
-        capsys,
-        ["--schema", "tos", str(missing)],
-        model=ToolCallingFakeChatModel(response=AIMessage(content="unused")),
-    )
+    result = run_cli(capsys, ["--schema", "tos", str(missing)])
 
     assert result.exit_code == 1
     assert result.stdout == ""
@@ -287,11 +257,7 @@ def test_a_missing_input_file_is_reported_as_an_input_error(
 def test_an_unreadable_input_path_is_reported_as_an_input_error(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    result = run_cli(
-        capsys,
-        ["--schema", "tos", str(tmp_path)],
-        model=ToolCallingFakeChatModel(response=AIMessage(content="unused")),
-    )
+    result = run_cli(capsys, ["--schema", "tos", str(tmp_path)])
 
     assert result.exit_code == 1
     assert result.stdout == ""
@@ -303,9 +269,14 @@ def test_a_missing_api_key_is_a_named_configuration_error(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setattr("extractor.__main__.load_dotenv", lambda _: False)
+    monkeypatch.setattr("extractor.extraction.load_dotenv", lambda _: False)
 
-    result = run_cli(capsys, ["--schema", "tos", "-"], source="source")
+    result = run_cli(
+        capsys,
+        ["--schema", "tos", "-"],
+        source="source",
+        port_factory=build_openai_port,
+    )
 
     assert result.exit_code == 1
     assert result.stdout == ""
@@ -318,12 +289,7 @@ def test_an_oversize_document_is_refused_before_calling_the_model(
 ) -> None:
     document = "x" * 100_001
 
-    result = run_cli(
-        capsys,
-        ["--schema", "tos", "-"],
-        source=document,
-        model=ToolCallingFakeChatModel(response=AssertionError("the provider must not be called")),
-    )
+    result = run_cli(capsys, ["--schema", "tos", "-"], source=document)
 
     assert result.exit_code == 1
     assert result.stdout == ""

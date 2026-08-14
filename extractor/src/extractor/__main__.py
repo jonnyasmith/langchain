@@ -1,24 +1,22 @@
 import argparse
-import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TextIO
+from typing import TextIO, assert_never
 
-from dotenv import load_dotenv
-from langchain_core.language_models import BaseChatModel
-from langchain_openai import ChatOpenAI
-from langchain_openai.chat_models.base import OpenAIRefusalError
-
-from extractor.chain import extract
+from extractor.extraction import (
+    ConfigurationError,
+    EmptyExtraction,
+    Extracted,
+    PortFactory,
+    Refusal,
+    ValidationFailure,
+    build_openai_port,
+)
 from extractor.schemas import SCHEMAS
 
 DEFAULT_MODEL = "gpt-5-nano"
 MAX_DOCUMENT_CHARACTERS = 100_000
-
-
-class ConfigurationError(Exception):
-    """The extractor cannot construct its provider model."""
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -33,23 +31,11 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _real_model(model_id: str) -> BaseChatModel:
-    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
-    if not os.getenv("OPENAI_API_KEY"):
-        raise ConfigurationError("missing OPENAI_API_KEY; set it in extractor/.env")
-    return ChatOpenAI(model=model_id, reasoning_effort="none", temperature=0)
-
-
-def _report_refusal(error: OpenAIRefusalError) -> int:
-    sys.stderr.write(f"Refusal: {error}\n")
-    return 4
-
-
 def main(
     argv: Sequence[str] | None = None,
     *,
     stdin: TextIO = sys.stdin,
-    model: BaseChatModel | None = None,
+    port_factory: PortFactory = build_openai_port,
 ) -> int:
     args = _parser().parse_args(argv)
     if args.list_schemas:
@@ -79,30 +65,29 @@ def main(
         )
         return 1
     try:
-        selected_model = model if model is not None else _real_model(args.model)
-        result = extract(document, schema, selected_model)
-    except OpenAIRefusalError as error:
-        return _report_refusal(error)
+        extract = port_factory(args.model, sys.stderr if args.debug else None)
+        outcome = extract(document, schema)
     except ConfigurationError as error:
         sys.stderr.write(f"Configuration error: {error}\n")
         return 1
     except Exception as error:
         sys.stderr.write(f"Unexpected error: {error}\n")
         return 1
-    if args.debug:
-        sys.stderr.write(f"Raw model message: {result['raw']!r}\n")
-    parsing_error = result["parsing_error"]
-    if isinstance(parsing_error, OpenAIRefusalError):
-        return _report_refusal(parsing_error)
-    if parsing_error is not None:
-        sys.stderr.write(f"Validation failure: {parsing_error}\n")
-        return 2
-    parsed = result["parsed"]
-    if parsed is None:
-        sys.stderr.write("Empty extraction: the model returned no object.\n")
-        return 3
-    sys.stdout.write(parsed.model_dump_json() + "\n")
-    return 0
+    match outcome:
+        case Extracted(value=value):
+            sys.stdout.write(value.model_dump_json() + "\n")
+            return 0
+        case ValidationFailure(detail=detail):
+            sys.stderr.write(f"Validation failure: {detail}\n")
+            return 2
+        case EmptyExtraction():
+            sys.stderr.write("Empty extraction: the model returned no object.\n")
+            return 3
+        case Refusal(detail=detail):
+            sys.stderr.write(f"Refusal: {detail}\n")
+            return 4
+        case unreachable:
+            assert_never(unreachable)
 
 
 if __name__ == "__main__":
