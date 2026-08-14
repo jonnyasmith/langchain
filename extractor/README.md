@@ -34,16 +34,16 @@ uv run mypy
 uv run pytest
 ```
 
-The default test run is offline and passes with no API key. Tests marked `live` make a real
-provider call and are deselected unless you ask for them:
+The default test run is offline and passes with no API key. The test marked `live` is
+deselected unless explicitly selected:
 
 ```bash
 uv run pytest -m live
 ```
 
-Those tests need a funded key with access to the model under test, and they cost money. With
-no key they skip rather than fail, so read the count: `2 passed` means the provider really
-enforced the schema, while `2 skipped` means nothing was checked.
+This makes one real OpenAI provider call and therefore costs money. Set a funded
+`OPENAI_API_KEY` with access to the configured model in the environment or in
+`extractor/.env` before running it.
 
 ## Run
 
