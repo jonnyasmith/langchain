@@ -8,7 +8,7 @@ from typing import NamedTuple, TextIO
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from extractor.__main__ import main
+from extractor.__main__ import ExitCode, main
 from extractor.extraction import (
     EmptyExtraction,
     Extracted,
@@ -23,7 +23,7 @@ from extractor.schemas import TermsOfService
 
 
 class CliResult(NamedTuple):
-    exit_code: int
+    exit_code: ExitCode
     stdout: str
     stderr: str
 
@@ -109,7 +109,7 @@ def test_a_valid_extraction_is_the_only_stdout_and_exits_zero(
         port_factory=staged,
     )
 
-    assert result == CliResult(0, json.dumps(expected, separators=(",", ":")) + "\n", "")
+    assert result == CliResult(ExitCode.OK, json.dumps(expected, separators=(",", ":")) + "\n", "")
     assert staged.documents == ["Terms of Service source"]
     assert staged.debug is None
 
@@ -134,7 +134,7 @@ def test_an_invalid_model_value_is_a_validation_failure(
         port_factory=StagedPort(ValidationFailure(detail=schema_rejection_detail(invalid))),
     )
 
-    assert result.exit_code == 2
+    assert result.exit_code == ExitCode.VALIDATION_FAILURE
     assert result.stdout == ""
     assert "validation failure" in result.stderr.lower()
     assert "effective_date" in result.stderr
@@ -150,7 +150,7 @@ def test_a_model_answer_without_an_object_is_an_empty_extraction(
         port_factory=StagedPort(EmptyExtraction()),
     )
 
-    assert result.exit_code == 3
+    assert result.exit_code == ExitCode.EMPTY_EXTRACTION
     assert result.stdout == ""
     assert "empty extraction" in result.stderr.lower()
 
@@ -165,7 +165,7 @@ def test_a_refusal_outcome_is_reported_separately(
         port_factory=StagedPort(Refusal(detail="The provider declined this extraction.")),
     )
 
-    assert result.exit_code == 4
+    assert result.exit_code == ExitCode.REFUSAL
     assert result.stdout == ""
     assert "refusal" in result.stderr.lower()
     assert "declined" in result.stderr.lower()
@@ -181,7 +181,7 @@ def test_an_unexpected_provider_error_uses_the_generic_failure_exit(
         port_factory=failing_port(ConnectionError("network unavailable")),
     )
 
-    assert result.exit_code == 1
+    assert result.exit_code == ExitCode.INPUT
     assert result.stdout == ""
     assert "unexpected error" in result.stderr.lower()
     assert "network unavailable" in result.stderr.lower()
@@ -208,7 +208,7 @@ def test_debug_directs_the_raw_message_dump_to_stderr(
         port_factory=staged,
     )
 
-    assert result.exit_code == 0
+    assert result.exit_code == ExitCode.OK
     assert json.loads(result.stdout) == extracted
     # `main` owns only the wiring; `test_extraction.py` covers what the adapter writes there.
     assert staged.debug is sys.stderr
@@ -229,7 +229,7 @@ def test_a_source_file_is_read_for_extraction(capsys: pytest.CaptureFixture[str]
     staged = StagedPort(Extracted(TermsOfService.model_validate(expected)))
     result = run_cli(capsys, ["--schema", "tos", str(fixture)], port_factory=staged)
 
-    assert result.exit_code == 0
+    assert result.exit_code == ExitCode.OK
     assert json.loads(result.stdout) == expected
     assert result.stderr == ""
     assert staged.documents == [fixture.read_text(encoding="utf-8")]
@@ -238,7 +238,7 @@ def test_a_source_file_is_read_for_extraction(capsys: pytest.CaptureFixture[str]
 def test_listing_schemas_needs_no_input_or_model(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert run_cli(capsys, ["--list-schemas"]) == CliResult(0, "tos\n", "")
+    assert run_cli(capsys, ["--list-schemas"]) == CliResult(ExitCode.OK, "tos\n", "")
 
 
 def test_an_unknown_schema_name_lists_valid_names(
@@ -248,7 +248,7 @@ def test_an_unknown_schema_name_lists_valid_names(
         capsys, ["--schema", "contract", "-"], source="source", port_factory=tripwire_port
     )
 
-    assert result.exit_code == 1
+    assert result.exit_code == ExitCode.INPUT
     assert result.stdout == ""
     assert "unknown schema" in result.stderr.lower()
     assert "tos" in result.stderr
@@ -261,7 +261,7 @@ def test_a_missing_input_file_is_reported_as_an_input_error(
 
     result = run_cli(capsys, ["--schema", "tos", str(missing)], port_factory=tripwire_port)
 
-    assert result.exit_code == 1
+    assert result.exit_code == ExitCode.INPUT
     assert result.stdout == ""
     assert "input file" in result.stderr.lower()
     assert str(missing) in result.stderr
@@ -273,7 +273,7 @@ def test_an_unreadable_input_path_is_reported_as_an_input_error(
 ) -> None:
     result = run_cli(capsys, ["--schema", "tos", str(tmp_path)], port_factory=tripwire_port)
 
-    assert result.exit_code == 1
+    assert result.exit_code == ExitCode.INPUT
     assert result.stdout == ""
     assert "input file error" in result.stderr.lower()
     assert str(tmp_path) in result.stderr
@@ -292,7 +292,7 @@ def test_a_missing_api_key_is_a_named_configuration_error(
         port_factory=build_openai_port,
     )
 
-    assert result.exit_code == 1
+    assert result.exit_code == ExitCode.INPUT
     assert result.stdout == ""
     assert "configuration error" in result.stderr.lower()
     assert "openai_api_key" in result.stderr.lower()
@@ -305,7 +305,20 @@ def test_an_oversize_document_is_refused_before_calling_the_model(
 
     result = run_cli(capsys, ["--schema", "tos", "-"], source=document, port_factory=tripwire_port)
 
-    assert result.exit_code == 1
+    assert result.exit_code == ExitCode.INPUT
     assert result.stdout == ""
     assert "100,000" in result.stderr
     assert "100,001" in result.stderr
+
+
+def test_the_documented_exit_numbers_are_pinned() -> None:
+    """`README.md` publishes these numbers as the CLI contract; renumbering breaks here."""
+    assert {member.name: member.value for member in ExitCode} == {
+        "OK": 0,
+        "INPUT": 1,
+        "VALIDATION_FAILURE": 2,
+        "EMPTY_EXTRACTION": 3,
+        "REFUSAL": 4,
+    }
+    # `raise SystemExit(main())` passes a member straight to the process status.
+    assert isinstance(ExitCode.REFUSAL, int)
