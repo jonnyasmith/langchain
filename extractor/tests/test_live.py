@@ -15,17 +15,51 @@ import json
 import warnings
 from datetime import date
 from pathlib import Path
+from typing import TextIO
 
 import pytest
+from pydantic import BaseModel
 
 from extractor.__main__ import DEFAULT_MODEL, ExitCode, main
-from extractor.extraction import ConfigurationError, build_openai_port
+from extractor.extraction import (
+    ConfigurationError,
+    Extraction,
+    ExtractionPort,
+    PortFactory,
+    ProviderFailure,
+    ProviderRejectedRequest,
+    build_openai_port,
+)
 from extractor.schemas import TermsOfService
 
 FIXTURE = Path(__file__).parent / "fixtures" / "terms.html"
 
 
-@pytest.fixture(autouse=True)
+def staged_port(outcome: Extraction) -> PortFactory:
+    """Build a port factory that returns one prepared live-test outcome."""
+
+    def factory(_model_id: str, _debug: TextIO | None) -> ExtractionPort:
+        def extract(document: str, schema: type[BaseModel]) -> Extraction:
+            return outcome
+
+        return extract
+
+    return factory
+
+
+def _require_live_success(exit_code: ExitCode, stderr: str) -> None:
+    """Skip only when the provider could not check the live contract; fail otherwise."""
+    if exit_code is ExitCode.PROVIDER_FAILURE:
+        message = (
+            "LIVE TEST SKIPPED, NOT PASSED: the provider could not serve the request, so "
+            f"the strict-schema contract was never checked ({stderr.strip()}). Rerun "
+            "`uv run pytest -m live` after the provider or account recovers."
+        )
+        warnings.warn(message, stacklevel=1)
+        pytest.skip(message)
+    assert exit_code is ExitCode.OK, stderr
+
+
 def configured_provider() -> None:
     """Skip loudly when there is no key — never let a live test look like it ran.
 
@@ -50,15 +84,47 @@ def configured_provider() -> None:
         pytest.skip(message)
 
 
+def test_a_provider_failure_skips_the_unchecked_live_contract(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = main(
+        ["--schema", "tos", str(FIXTURE)],
+        port_factory=staged_port(ProviderFailure(detail="Error code: 429 - quota exhausted")),
+    )
+    captured = capsys.readouterr()
+
+    with (
+        pytest.warns(UserWarning, match="LIVE TEST SKIPPED, NOT PASSED"),
+        pytest.raises(pytest.skip.Exception, match="strict-schema contract was never checked"),
+    ):
+        _require_live_success(exit_code, captured.err)
+
+
+def test_a_provider_rejected_request_fails_the_live_contract(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = main(
+        ["--schema", "tos", str(FIXTURE)],
+        port_factory=staged_port(
+            ProviderRejectedRequest(detail="Error code: 404 - model does not exist")
+        ),
+    )
+    captured = capsys.readouterr()
+
+    with pytest.raises(AssertionError, match="Provider-rejected request"):
+        _require_live_success(exit_code, captured.err)
+
+
 @pytest.mark.live
 def test_the_provider_enforced_schema_extracts_the_fixture_terms(
     capsys: pytest.CaptureFixture[str],
+    configured_provider: None,
 ) -> None:
     """The whole app against the real provider: one document in, one JSON object out, exit 0."""
     exit_code = main(["--schema", "tos", str(FIXTURE)])
 
     captured = capsys.readouterr()
-    assert exit_code is ExitCode.OK, captured.err
+    _require_live_success(exit_code, captured.err)
     assert captured.err == ""
 
     value = TermsOfService.model_validate(json.loads(captured.out))
