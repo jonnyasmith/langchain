@@ -59,18 +59,18 @@ def build_openai_port(model_id: str, debug: TextIO | None) -> ExtractionPort:
     if not os.getenv("OPENAI_API_KEY"):
         raise ConfigurationError("missing OPENAI_API_KEY; set it in extractor/.env")
     model = ChatOpenAI(model=model_id, reasoning_effort="none", temperature=0)
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                "Extract only facts stated in the source document. "
+                "Do not infer or guess; use null when the source does not answer a field.",
+            ),
+            ("human", "{document}"),
+        ]
+    )
 
     def extract(document: str, schema: type[BaseModel]) -> Extraction:
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    "Extract only facts stated in the source document. "
-                    "Do not infer or guess; use null when the source does not answer a field.",
-                ),
-                ("human", "{document}"),
-            ]
-        )
         structured_model = model.with_structured_output(
             schema,
             method="json_schema",

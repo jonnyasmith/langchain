@@ -1,4 +1,5 @@
 import json
+import sys
 from collections.abc import Sequence
 from io import StringIO
 from pathlib import Path
@@ -27,18 +28,26 @@ class CliResult(NamedTuple):
     stderr: str
 
 
-def staged_port(outcome: Extraction, *, raw: str = "") -> PortFactory:
-    """A port factory whose port always yields `outcome`, dumping `raw` when debugging."""
+class StagedPort:
+    """A port factory yielding one prepared outcome, recording how `main` wired it up."""
 
-    def factory(model_id: str, debug: TextIO | None) -> ExtractionPort:
+    def __init__(self, outcome: Extraction) -> None:
+        self.outcome = outcome
+        self.debug: TextIO | None = None
+        self.documents: list[str] = []
+
+    def __call__(self, model_id: str, debug: TextIO | None) -> ExtractionPort:
+        self.debug = debug
+
         def extract(document: str, schema: type[BaseModel]) -> Extraction:
-            if debug is not None:
-                debug.write(f"Raw model message: {raw!r}\n")
-            return outcome
+            self.documents.append(document)
+            return self.outcome
 
         return extract
 
-    return factory
+
+class PortCalled(BaseException):
+    """The tripwire fired. Not an `Exception`, so `main` cannot absorb it into exit 1."""
 
 
 def failing_port(error: BaseException) -> PortFactory:
@@ -53,7 +62,7 @@ def failing_port(error: BaseException) -> PortFactory:
     return factory
 
 
-UNUSED_PORT: PortFactory = failing_port(AssertionError("the provider must not be called"))
+UNUSED_PORT: PortFactory = failing_port(PortCalled("the extraction port must not be called"))
 
 
 def schema_rejection_detail(candidate: object) -> str:
@@ -90,14 +99,17 @@ def test_a_valid_extraction_is_the_only_stdout_and_exits_zero(
         "effective_date": "2026-01-01",
     }
 
+    staged = StagedPort(Extracted(TermsOfService.model_validate(expected)))
     result = run_cli(
         capsys,
         ["--schema", "tos", "-"],
         source="Terms of Service source",
-        port_factory=staged_port(Extracted(TermsOfService.model_validate(expected))),
+        port_factory=staged,
     )
 
     assert result == CliResult(0, json.dumps(expected, separators=(",", ":")) + "\n", "")
+    assert staged.documents == ["Terms of Service source"]
+    assert staged.debug is None
 
 
 def test_an_invalid_model_value_is_a_validation_failure(
@@ -117,7 +129,7 @@ def test_an_invalid_model_value_is_a_validation_failure(
         capsys,
         ["--schema", "tos", "-"],
         source="Terms of Service source",
-        port_factory=staged_port(ValidationFailure(detail=schema_rejection_detail(invalid))),
+        port_factory=StagedPort(ValidationFailure(detail=schema_rejection_detail(invalid))),
     )
 
     assert result.exit_code == 2
@@ -133,7 +145,7 @@ def test_a_model_answer_without_an_object_is_an_empty_extraction(
         capsys,
         ["--schema", "tos", "-"],
         source="Terms of Service source",
-        port_factory=staged_port(EmptyExtraction()),
+        port_factory=StagedPort(EmptyExtraction()),
     )
 
     assert result.exit_code == 3
@@ -141,14 +153,14 @@ def test_a_model_answer_without_an_object_is_an_empty_extraction(
     assert "empty extraction" in result.stderr.lower()
 
 
-def test_a_provider_refusal_from_raw_parsing_is_reported_separately(
+def test_a_refusal_outcome_is_reported_separately(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     result = run_cli(
         capsys,
         ["--schema", "tos", "-"],
         source="Terms of Service source",
-        port_factory=staged_port(Refusal(detail="The provider declined this extraction.")),
+        port_factory=StagedPort(Refusal(detail="The provider declined this extraction.")),
     )
 
     assert result.exit_code == 4
@@ -173,7 +185,7 @@ def test_an_unexpected_provider_error_uses_the_generic_failure_exit(
     assert "network unavailable" in result.stderr.lower()
 
 
-def test_debug_dumps_the_raw_model_message_to_stderr(
+def test_debug_directs_the_raw_message_dump_to_stderr(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     extracted = {
@@ -185,19 +197,19 @@ def test_debug_dumps_the_raw_model_message_to_stderr(
         "data_retention_period": None,
         "effective_date": None,
     }
+    staged = StagedPort(Extracted(TermsOfService.model_validate(extracted)))
 
     result = run_cli(
         capsys,
         ["--debug", "--schema", "tos", "-"],
         source="Terms of Service source",
-        port_factory=staged_port(
-            Extracted(TermsOfService.model_validate(extracted)), raw="raw provider message"
-        ),
+        port_factory=staged,
     )
 
     assert result.exit_code == 0
     assert json.loads(result.stdout) == extracted
-    assert "raw provider message" in result.stderr
+    # `main` owns only the wiring; `test_extraction.py` covers what the adapter writes there.
+    assert staged.debug is sys.stderr
 
 
 def test_a_source_file_is_read_for_extraction(capsys: pytest.CaptureFixture[str]) -> None:
@@ -212,15 +224,13 @@ def test_a_source_file_is_read_for_extraction(capsys: pytest.CaptureFixture[str]
     }
     fixture = Path(__file__).parent / "fixtures" / "terms.html"
 
-    result = run_cli(
-        capsys,
-        ["--schema", "tos", str(fixture)],
-        port_factory=staged_port(Extracted(TermsOfService.model_validate(expected))),
-    )
+    staged = StagedPort(Extracted(TermsOfService.model_validate(expected)))
+    result = run_cli(capsys, ["--schema", "tos", str(fixture)], port_factory=staged)
 
     assert result.exit_code == 0
     assert json.loads(result.stdout) == expected
     assert result.stderr == ""
+    assert staged.documents == [fixture.read_text(encoding="utf-8")]
 
 
 def test_listing_schemas_needs_no_input_or_model(
