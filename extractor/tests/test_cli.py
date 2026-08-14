@@ -1,0 +1,325 @@
+import json
+import sys
+from collections.abc import Sequence
+from io import StringIO
+from pathlib import Path
+from typing import NamedTuple, TextIO
+
+import pytest
+from pydantic import BaseModel, ValidationError
+
+from extractor.__main__ import ExitCode, main
+from extractor.extraction import (
+    EmptyExtraction,
+    Extracted,
+    Extraction,
+    ExtractionPort,
+    PortFactory,
+    Refusal,
+    ValidationFailure,
+    build_openai_port,
+)
+from extractor.schemas import TermsOfService
+
+
+class CliResult(NamedTuple):
+    exit_code: ExitCode
+    stdout: str
+    stderr: str
+
+
+class StagedPort:
+    """A port factory yielding one prepared outcome, recording how `main` wired it up."""
+
+    def __init__(self, outcome: Extraction) -> None:
+        self.outcome = outcome
+        self.debug: TextIO | None = None
+        self.documents: list[str] = []
+
+    def __call__(self, model_id: str, debug: TextIO | None) -> ExtractionPort:
+        self.debug = debug
+
+        def extract(document: str, schema: type[BaseModel]) -> Extraction:
+            self.documents.append(document)
+            return self.outcome
+
+        return extract
+
+
+class PortCalled(BaseException):
+    """The tripwire fired. Not an `Exception`, so `main` cannot absorb it into exit 1."""
+
+
+def failing_port(error: BaseException) -> PortFactory:
+    """A port factory whose port always raises `error`."""
+
+    def factory(model_id: str, debug: TextIO | None) -> ExtractionPort:
+        def extract(document: str, schema: type[BaseModel]) -> Extraction:
+            raise error
+
+        return extract
+
+    return factory
+
+
+def tripwire_port(model_id: str, debug: TextIO | None) -> ExtractionPort:
+    """A tripwire: reaching the provider at all — even constructing it — is the bug under test."""
+    raise PortCalled("the extraction port must not be constructed")
+
+
+def schema_rejection_detail(candidate: object) -> str:
+    """The real schema-rejection text for a candidate object, so assertions stay honest."""
+    try:
+        TermsOfService.model_validate(candidate)
+    except ValidationError as error:
+        return str(error)
+    raise AssertionError("the candidate object was accepted by the schema")
+
+
+def run_cli(
+    capsys: pytest.CaptureFixture[str],
+    argv: Sequence[str],
+    *,
+    source: str = "",
+    port_factory: PortFactory = tripwire_port,
+) -> CliResult:
+    exit_code = main(argv, stdin=StringIO(source), port_factory=port_factory)
+    captured = capsys.readouterr()
+    return CliResult(exit_code, captured.out, captured.err)
+
+
+def test_a_valid_extraction_is_the_only_stdout_and_exits_zero(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    expected = {
+        "governing_law": "State of New York",
+        "arbitration_required": True,
+        "arbitration_clause": "Disputes must be resolved by binding arbitration.",
+        "liability_cap": "$100",
+        "termination_notice_period": "30 days",
+        "data_retention_period": None,
+        "effective_date": "2026-01-01",
+    }
+
+    staged = StagedPort(Extracted(TermsOfService.model_validate(expected)))
+    result = run_cli(
+        capsys,
+        ["--schema", "tos", "-"],
+        source="Terms of Service source",
+        port_factory=staged,
+    )
+
+    assert result == CliResult(ExitCode.OK, json.dumps(expected, separators=(",", ":")) + "\n", "")
+    assert staged.documents == ["Terms of Service source"]
+    assert staged.debug is None
+
+
+def test_an_invalid_model_value_is_a_validation_failure(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    invalid = {
+        "governing_law": None,
+        "arbitration_required": None,
+        "arbitration_clause": None,
+        "liability_cap": None,
+        "termination_notice_period": None,
+        "data_retention_period": None,
+        "effective_date": "not-a-date",
+    }
+
+    result = run_cli(
+        capsys,
+        ["--schema", "tos", "-"],
+        source="Terms of Service source",
+        port_factory=StagedPort(ValidationFailure(detail=schema_rejection_detail(invalid))),
+    )
+
+    assert result.exit_code == ExitCode.VALIDATION_FAILURE
+    assert result.stdout == ""
+    assert "validation failure" in result.stderr.lower()
+    assert "effective_date" in result.stderr
+
+
+def test_a_model_answer_without_an_object_is_an_empty_extraction(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = run_cli(
+        capsys,
+        ["--schema", "tos", "-"],
+        source="Terms of Service source",
+        port_factory=StagedPort(EmptyExtraction()),
+    )
+
+    assert result.exit_code == ExitCode.EMPTY_EXTRACTION
+    assert result.stdout == ""
+    assert "empty extraction" in result.stderr.lower()
+
+
+def test_a_refusal_outcome_is_reported_separately(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = run_cli(
+        capsys,
+        ["--schema", "tos", "-"],
+        source="Terms of Service source",
+        port_factory=StagedPort(Refusal(detail="The provider declined this extraction.")),
+    )
+
+    assert result.exit_code == ExitCode.REFUSAL
+    assert result.stdout == ""
+    assert "refusal" in result.stderr.lower()
+    assert "declined" in result.stderr.lower()
+
+
+def test_an_unexpected_provider_error_uses_the_generic_failure_exit(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = run_cli(
+        capsys,
+        ["--schema", "tos", "-"],
+        source="Terms of Service source",
+        port_factory=failing_port(ConnectionError("network unavailable")),
+    )
+
+    assert result.exit_code == ExitCode.FAILURE
+    assert result.stdout == ""
+    assert "unexpected error" in result.stderr.lower()
+    assert "network unavailable" in result.stderr.lower()
+
+
+def test_debug_directs_the_raw_message_dump_to_stderr(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    extracted = {
+        "governing_law": None,
+        "arbitration_required": None,
+        "arbitration_clause": None,
+        "liability_cap": None,
+        "termination_notice_period": None,
+        "data_retention_period": None,
+        "effective_date": None,
+    }
+    staged = StagedPort(Extracted(TermsOfService.model_validate(extracted)))
+
+    result = run_cli(
+        capsys,
+        ["--debug", "--schema", "tos", "-"],
+        source="Terms of Service source",
+        port_factory=staged,
+    )
+
+    assert result.exit_code == ExitCode.OK
+    assert json.loads(result.stdout) == extracted
+    # `main` owns only the wiring; `test_extraction.py` covers what the adapter writes there.
+    assert staged.debug is sys.stderr
+
+
+def test_a_source_file_is_read_for_extraction(capsys: pytest.CaptureFixture[str]) -> None:
+    expected = {
+        "governing_law": "State of New York",
+        "arbitration_required": True,
+        "arbitration_clause": "Binding arbitration administered by the AAA.",
+        "liability_cap": "USD 100",
+        "termination_notice_period": "30 days",
+        "data_retention_period": None,
+        "effective_date": "2026-01-01",
+    }
+    fixture = Path(__file__).parent / "fixtures" / "terms.html"
+
+    staged = StagedPort(Extracted(TermsOfService.model_validate(expected)))
+    result = run_cli(capsys, ["--schema", "tos", str(fixture)], port_factory=staged)
+
+    assert result.exit_code == ExitCode.OK
+    assert json.loads(result.stdout) == expected
+    assert result.stderr == ""
+    assert staged.documents == [fixture.read_text(encoding="utf-8")]
+
+
+def test_listing_schemas_needs_no_input_or_model(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert run_cli(capsys, ["--list-schemas"]) == CliResult(ExitCode.OK, "tos\n", "")
+
+
+def test_an_unknown_schema_name_lists_valid_names(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = run_cli(
+        capsys, ["--schema", "contract", "-"], source="source", port_factory=tripwire_port
+    )
+
+    assert result.exit_code == ExitCode.FAILURE
+    assert result.stdout == ""
+    assert "unknown schema" in result.stderr.lower()
+    assert "tos" in result.stderr
+
+
+def test_a_missing_input_file_is_reported_as_an_input_error(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    missing = tmp_path / "missing.html"
+
+    result = run_cli(capsys, ["--schema", "tos", str(missing)], port_factory=tripwire_port)
+
+    assert result.exit_code == ExitCode.FAILURE
+    assert result.stdout == ""
+    assert "input file" in result.stderr.lower()
+    assert str(missing) in result.stderr
+    assert "validation failure" not in result.stderr.lower()
+
+
+def test_an_unreadable_input_path_is_reported_as_an_input_error(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    result = run_cli(capsys, ["--schema", "tos", str(tmp_path)], port_factory=tripwire_port)
+
+    assert result.exit_code == ExitCode.FAILURE
+    assert result.stdout == ""
+    assert "input file error" in result.stderr.lower()
+    assert str(tmp_path) in result.stderr
+
+
+def test_a_missing_api_key_is_a_named_configuration_error(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr("extractor.extraction.load_dotenv", lambda _: False)
+
+    result = run_cli(
+        capsys,
+        ["--schema", "tos", "-"],
+        source="source",
+        port_factory=build_openai_port,
+    )
+
+    assert result.exit_code == ExitCode.FAILURE
+    assert result.stdout == ""
+    assert "configuration error" in result.stderr.lower()
+    assert "openai_api_key" in result.stderr.lower()
+
+
+def test_an_oversize_document_is_refused_before_calling_the_model(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    document = "x" * 100_001
+
+    result = run_cli(capsys, ["--schema", "tos", "-"], source=document, port_factory=tripwire_port)
+
+    assert result.exit_code == ExitCode.FAILURE
+    assert result.stdout == ""
+    assert "100,000" in result.stderr
+    assert "100,001" in result.stderr
+
+
+def test_the_documented_exit_numbers_are_pinned() -> None:
+    """`README.md` publishes these numbers as the CLI contract; renumbering breaks here."""
+    assert {member.name: member.value for member in ExitCode} == {
+        "OK": 0,
+        "FAILURE": 1,
+        "VALIDATION_FAILURE": 2,
+        "EMPTY_EXTRACTION": 3,
+        "REFUSAL": 4,
+    }
+    # `IntEnum`, not `Enum`: `raise SystemExit(main())` hands a member straight to the
+    # process status. Downgrading the base breaks that silently — nothing else fails.
+    assert isinstance(ExitCode.REFUSAL, int)
