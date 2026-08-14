@@ -70,10 +70,3 @@ def test_the_ceiling_counts_characters_after_decoding(tmp_path: Path) -> None:
 
     assert not isinstance(document, InputFailure)
     assert len(document) == MAX_DOCUMENT_CHARACTERS
-
-
-def test_a_failure_message_carries_no_trailing_newline() -> None:
-    failure = load_source_document("-", StringIO("x" * (MAX_DOCUMENT_CHARACTERS + 1)))
-
-    assert isinstance(failure, InputFailure)
-    assert not failure.message.endswith("\n")

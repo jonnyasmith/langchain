@@ -67,9 +67,6 @@ def tripwire_port(model_id: str, debug: TextIO | None) -> ExtractionPort:
     raise PortCalled("the extraction port must not be constructed")
 
 
-TRIPWIRE_PORT: PortFactory = tripwire_port
-
-
 def schema_rejection_detail(candidate: object) -> str:
     """The real schema-rejection text for a candidate object, so assertions stay honest."""
     try:
@@ -84,7 +81,7 @@ def run_cli(
     argv: Sequence[str],
     *,
     source: str = "",
-    port_factory: PortFactory = TRIPWIRE_PORT,
+    port_factory: PortFactory = tripwire_port,
 ) -> CliResult:
     exit_code = main(argv, stdin=StringIO(source), port_factory=port_factory)
     captured = capsys.readouterr()
@@ -248,7 +245,7 @@ def test_an_unknown_schema_name_lists_valid_names(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     result = run_cli(
-        capsys, ["--schema", "contract", "-"], source="source", port_factory=TRIPWIRE_PORT
+        capsys, ["--schema", "contract", "-"], source="source", port_factory=tripwire_port
     )
 
     assert result.exit_code == 1
@@ -262,7 +259,7 @@ def test_a_missing_input_file_is_reported_as_an_input_error(
 ) -> None:
     missing = tmp_path / "missing.html"
 
-    result = run_cli(capsys, ["--schema", "tos", str(missing)], port_factory=TRIPWIRE_PORT)
+    result = run_cli(capsys, ["--schema", "tos", str(missing)], port_factory=tripwire_port)
 
     assert result.exit_code == 1
     assert result.stdout == ""
@@ -274,7 +271,7 @@ def test_a_missing_input_file_is_reported_as_an_input_error(
 def test_an_unreadable_input_path_is_reported_as_an_input_error(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    result = run_cli(capsys, ["--schema", "tos", str(tmp_path)], port_factory=TRIPWIRE_PORT)
+    result = run_cli(capsys, ["--schema", "tos", str(tmp_path)], port_factory=tripwire_port)
 
     assert result.exit_code == 1
     assert result.stdout == ""
@@ -306,7 +303,7 @@ def test_an_oversize_document_is_refused_before_calling_the_model(
 ) -> None:
     document = "x" * 100_001
 
-    result = run_cli(capsys, ["--schema", "tos", "-"], source=document, port_factory=TRIPWIRE_PORT)
+    result = run_cli(capsys, ["--schema", "tos", "-"], source=document, port_factory=tripwire_port)
 
     assert result.exit_code == 1
     assert result.stdout == ""

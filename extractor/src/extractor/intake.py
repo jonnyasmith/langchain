@@ -4,8 +4,6 @@ from typing import TextIO
 
 MAX_DOCUMENT_CHARACTERS = 100_000
 
-STDIN_SPEC = "-"
-
 
 @dataclass(frozen=True, slots=True)
 class InputFailure:
@@ -28,7 +26,7 @@ def load_source_document(spec: str, stdin: TextIO) -> str | InputFailure:
     already cleared the character ceiling, so no caller can proceed with an oversize document.
     """
     try:
-        document = stdin.read() if spec == STDIN_SPEC else Path(spec).read_text(encoding="utf-8")
+        document = stdin.read() if spec == "-" else Path(spec).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as error:
         return InputFailure(message=f"Input file error for {spec!r}: {_detail(error)}.")
     document_size = len(document)
