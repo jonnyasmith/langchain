@@ -19,10 +19,15 @@ from extractor.schemas import SCHEMAS
 
 
 class ExitCode(IntEnum):
-    """The CLI's documented exit statuses. `README.md` publishes these numbers."""
+    """The CLI's documented exit statuses. `README.md` publishes these numbers.
+
+    `FAILURE` is the shared status for everything that is not an `Extraction` outcome:
+    a bad invocation, an unreadable or oversize document, missing configuration, and
+    any unexpected error. The four outcome statuses are assigned by `_report`.
+    """
 
     OK = 0
-    INPUT = 1
+    FAILURE = 1
     VALIDATION_FAILURE = 2
     EMPTY_EXTRACTION = 3
     REFUSAL = 4
@@ -79,25 +84,25 @@ def main(
         return ExitCode.OK
     if args.schema is None or args.input is None:
         sys.stderr.write("Input error: --schema and an input path are required.\n")
-        return ExitCode.INPUT
+        return ExitCode.FAILURE
     schema = SCHEMAS.get(args.schema)
     if schema is None:
         valid_names = ", ".join(sorted(SCHEMAS))
         sys.stderr.write(f"Unknown schema {args.schema!r}. Valid schemas: {valid_names}.\n")
-        return ExitCode.INPUT
+        return ExitCode.FAILURE
     document = load_source_document(args.input, stdin)
     if isinstance(document, InputFailure):
         sys.stderr.write(document.message + "\n")
-        return ExitCode.INPUT
+        return ExitCode.FAILURE
     try:
         extract = port_factory(args.model, sys.stderr if args.debug else None)
         outcome = extract(document, schema)
     except ConfigurationError as error:
         sys.stderr.write(f"Configuration error: {error}\n")
-        return ExitCode.INPUT
+        return ExitCode.FAILURE
     except Exception as error:
         sys.stderr.write(f"Unexpected error: {error}\n")
-        return ExitCode.INPUT
+        return ExitCode.FAILURE
     return _report(outcome)
 
 

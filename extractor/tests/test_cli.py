@@ -181,7 +181,7 @@ def test_an_unexpected_provider_error_uses_the_generic_failure_exit(
         port_factory=failing_port(ConnectionError("network unavailable")),
     )
 
-    assert result.exit_code == ExitCode.INPUT
+    assert result.exit_code == ExitCode.FAILURE
     assert result.stdout == ""
     assert "unexpected error" in result.stderr.lower()
     assert "network unavailable" in result.stderr.lower()
@@ -248,7 +248,7 @@ def test_an_unknown_schema_name_lists_valid_names(
         capsys, ["--schema", "contract", "-"], source="source", port_factory=tripwire_port
     )
 
-    assert result.exit_code == ExitCode.INPUT
+    assert result.exit_code == ExitCode.FAILURE
     assert result.stdout == ""
     assert "unknown schema" in result.stderr.lower()
     assert "tos" in result.stderr
@@ -261,7 +261,7 @@ def test_a_missing_input_file_is_reported_as_an_input_error(
 
     result = run_cli(capsys, ["--schema", "tos", str(missing)], port_factory=tripwire_port)
 
-    assert result.exit_code == ExitCode.INPUT
+    assert result.exit_code == ExitCode.FAILURE
     assert result.stdout == ""
     assert "input file" in result.stderr.lower()
     assert str(missing) in result.stderr
@@ -273,7 +273,7 @@ def test_an_unreadable_input_path_is_reported_as_an_input_error(
 ) -> None:
     result = run_cli(capsys, ["--schema", "tos", str(tmp_path)], port_factory=tripwire_port)
 
-    assert result.exit_code == ExitCode.INPUT
+    assert result.exit_code == ExitCode.FAILURE
     assert result.stdout == ""
     assert "input file error" in result.stderr.lower()
     assert str(tmp_path) in result.stderr
@@ -292,7 +292,7 @@ def test_a_missing_api_key_is_a_named_configuration_error(
         port_factory=build_openai_port,
     )
 
-    assert result.exit_code == ExitCode.INPUT
+    assert result.exit_code == ExitCode.FAILURE
     assert result.stdout == ""
     assert "configuration error" in result.stderr.lower()
     assert "openai_api_key" in result.stderr.lower()
@@ -305,7 +305,7 @@ def test_an_oversize_document_is_refused_before_calling_the_model(
 
     result = run_cli(capsys, ["--schema", "tos", "-"], source=document, port_factory=tripwire_port)
 
-    assert result.exit_code == ExitCode.INPUT
+    assert result.exit_code == ExitCode.FAILURE
     assert result.stdout == ""
     assert "100,000" in result.stderr
     assert "100,001" in result.stderr
@@ -315,10 +315,11 @@ def test_the_documented_exit_numbers_are_pinned() -> None:
     """`README.md` publishes these numbers as the CLI contract; renumbering breaks here."""
     assert {member.name: member.value for member in ExitCode} == {
         "OK": 0,
-        "INPUT": 1,
+        "FAILURE": 1,
         "VALIDATION_FAILURE": 2,
         "EMPTY_EXTRACTION": 3,
         "REFUSAL": 4,
     }
-    # `raise SystemExit(main())` passes a member straight to the process status.
+    # `IntEnum`, not `Enum`: `raise SystemExit(main())` hands a member straight to the
+    # process status. Downgrading the base breaks that silently — nothing else fails.
     assert isinstance(ExitCode.REFUSAL, int)
