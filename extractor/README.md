@@ -9,9 +9,9 @@ Feed it a scraped Terms of Service page or a cluttered email thread. A `ChatProm
 - Strict, provider-enforced Pydantic structured output
 - Named extraction schemas; `tos` ships with the tool
 - Validated JSON on stdout and diagnostics on stderr
-- Distinct validation, empty-extraction, and refusal outcomes
+- Distinct validation, empty-extraction, refusal, provider-failure, and rejected-request outcomes
 - File and stdin input with a 100,000-character safety limit
-- App-local OpenAI configuration with a model override
+- App-local OpenAI configuration with a model override, a 60-second request timeout, and two retries
 
 ## Requirements
 
@@ -41,10 +41,11 @@ deselected unless explicitly selected:
 uv run pytest -m live
 ```
 
-This makes one real OpenAI provider call and therefore costs money. Set a funded
+This makes one real OpenAI provider call and therefore costs money. Set an
 `OPENAI_API_KEY` with access to the configured model in the environment or in
-`extractor/.env` before running it. Without one the test skips with a warning naming
-what went unchecked, rather than failing.
+`extractor/.env` before running it. Without a key, or when the provider cannot serve
+the request, the test skips with a warning naming the unchecked strict-schema contract.
+A provider-rejected request still fails the test because it means the request itself is invalid.
 
 ## Run
 
@@ -67,6 +68,20 @@ uv run python -m extractor --list-schemas
 ```
 
 The default model is `gpt-5-nano`. Use `--model MODEL_ID` to override it and `--debug`
-to dump the raw model message to stderr. Successful extraction exits 0. Validation
-failure exits 2, empty extraction exits 3, provider refusal exits 4, and input,
-configuration, oversize, or unexpected failures exit 1.
+to dump the raw model message to stderr. Provider calls use a 60-second request timeout
+and two SDK retries.
+
+Exit statuses are:
+
+| Status | Meaning |
+| ---: | --- |
+| 0 | Successful extraction |
+| 1 | Input, configuration, oversize-document, or unexpected failure |
+| 2 | Schema validation failure |
+| 3 | Empty extraction |
+| 4 | Provider refusal |
+| 5 | Provider failure, such as credentials, quota, rate limit, server, network, or timeout |
+| 6 | Provider-rejected request: HTTP 400, 404, or 422 |
+
+An unknown model id is a provider-rejected request and exits 6; before this outcome was
+introduced, it fell through to the generic exit 1.

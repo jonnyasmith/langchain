@@ -30,5 +30,8 @@ weakened, and no coverage or mutation metric computed over the offline suite can
 Its assertions are reviewed by reading them, and that is the only mechanism available.
 
 A missing `OPENAI_API_KEY` skips this test with a warning naming what went unchecked, rather
-than failing it. A red suite for a cost the contributor never opted into is not a signal, and
-a silent skip is read as a pass.
+than failing it. A provider failure after construction skips in the same voice because the
+strict-schema contract was not exercised. A provider-rejected request must fail: it means the
+provider judged the extractor's request invalid, which is what this test exists to detect.
+A red suite for a cost the contributor never opted into is not a signal, and a silent skip is
+read as a pass. ADR-0004 records the outcome distinction and skip-versus-fail rule.

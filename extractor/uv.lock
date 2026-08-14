@@ -219,6 +219,7 @@ source = { editable = "." }
 dependencies = [
     { name = "langchain-core" },
     { name = "langchain-openai" },
+    { name = "openai" },
     { name = "pydantic" },
     { name = "python-dotenv" },
 ]
@@ -234,6 +235,7 @@ dev = [
 requires-dist = [
     { name = "langchain-core", specifier = ">=1.5" },
     { name = "langchain-openai", specifier = ">=1.5" },
+    { name = "openai", specifier = ">=3.0" },
     { name = "pydantic", specifier = ">=2.13" },
     { name = "python-dotenv", specifier = ">=1.1" },
 ]
