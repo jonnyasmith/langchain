@@ -17,9 +17,9 @@ Not implemented.
 
 ## Requirements
 
-- Python (version TBD when a `pyproject.toml` is added)
+- Python 3.14
 - [uv](https://docs.astral.sh/uv/) for dependency management
-- A model provider API key in `.env`
+- An OpenAI API key in `.env` — copy `.env.example` and fill it in
 
 ## Install
 
@@ -27,14 +27,24 @@ Not implemented.
 uv sync
 ```
 
-## Test
+## Verify
 
 ```bash
+uv run ruff format .
+uv run ruff check .
+uv run mypy
 uv run pytest
+```
+
+The default test run is offline and passes with no API key. Tests marked `live` make a real
+provider call and are deselected unless you ask for them:
+
+```bash
+uv run pytest -m live
 ```
 
 ## Run
 
 ```bash
-uv run python -m extractor
+uv run python -m extractor --schema tos FILE
 ```

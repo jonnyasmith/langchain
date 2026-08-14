@@ -1,0 +1,53 @@
+[project]
+name = "extractor"
+version = "0.1.0"
+description = "CLI that turns messy raw text into a strictly typed JSON object"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "langchain-core>=1.5",
+    "langchain-openai>=1.5",
+    "pydantic>=2.13",
+    "python-dotenv>=1.1",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.18",
+    "pytest>=8.4",
+    "ruff>=0.14",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/extractor"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "I",    # import sorting
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "SIM",  # simplify
+    "RUF",  # ruff-specific
+]
+
+[tool.mypy]
+python_version = "3.14"
+files = ["src", "tests"]
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers -m 'not live'"
+markers = [
+    "live: performs a real provider call; needs an API key and costs money",
+]
