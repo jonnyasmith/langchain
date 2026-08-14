@@ -4,6 +4,7 @@
 
 ### This context
 
+- How this module is written, and the idioms it rejects → CODING_STANDARDS.md
 - Extractor vocabulary → docs/agents/domain.md
 - Extractor decisions → docs/adr/
 
