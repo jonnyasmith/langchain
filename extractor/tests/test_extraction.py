@@ -176,6 +176,8 @@ def test_the_model_is_the_named_cheap_deterministic_tier(
         "model": "gpt-5-mini",
         "reasoning_effort": "none",
         "temperature": 0,
+        "timeout": 60,
+        "max_retries": 2,
     }
 
 

@@ -10,6 +10,8 @@ from extractor.extraction import (
     Extracted,
     Extraction,
     PortFactory,
+    ProviderFailure,
+    ProviderRejectedRequest,
     Refusal,
     ValidationFailure,
     build_openai_port,
@@ -23,7 +25,7 @@ class ExitCode(IntEnum):
 
     `FAILURE` is the shared status for everything that is not an `Extraction` outcome:
     a bad invocation, an unreadable or oversize document, missing configuration, and
-    any unexpected error. The four outcome statuses are assigned by `_report`.
+    any unexpected error. The outcome statuses are assigned by `_report`.
     """
 
     OK = 0
@@ -31,6 +33,8 @@ class ExitCode(IntEnum):
     VALIDATION_FAILURE = 2
     EMPTY_EXTRACTION = 3
     REFUSAL = 4
+    PROVIDER_FAILURE = 5
+    PROVIDER_REJECTED_REQUEST = 6
 
 
 DEFAULT_MODEL = "gpt-5-nano"
@@ -68,6 +72,12 @@ def _report(outcome: Extraction) -> ExitCode:
         case Refusal(detail=detail):
             sys.stderr.write(f"Refusal: {detail}\n")
             return ExitCode.REFUSAL
+        case ProviderFailure(detail=detail):
+            sys.stderr.write(f"Provider failure: {detail}\n")
+            return ExitCode.PROVIDER_FAILURE
+        case ProviderRejectedRequest(detail=detail):
+            sys.stderr.write(f"Provider-rejected request: {detail}\n")
+            return ExitCode.PROVIDER_REJECTED_REQUEST
         case unreachable:
             assert_never(unreachable)
 

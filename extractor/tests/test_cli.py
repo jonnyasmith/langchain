@@ -15,6 +15,8 @@ from extractor.extraction import (
     Extraction,
     ExtractionPort,
     PortFactory,
+    ProviderFailure,
+    ProviderRejectedRequest,
     Refusal,
     ValidationFailure,
     build_openai_port,
@@ -173,6 +175,38 @@ def test_a_refusal_outcome_is_reported_separately(
     assert "declined" in result.stderr.lower()
 
 
+def test_a_provider_failure_is_reported_as_retryable(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = run_cli(
+        capsys,
+        ["--schema", "tos", "-"],
+        source="Terms of Service source",
+        port_factory=StagedPort(ProviderFailure(detail="Error code: 429 - quota exhausted")),
+    )
+
+    assert result.exit_code == ExitCode.PROVIDER_FAILURE
+    assert result.stdout == ""
+    assert result.stderr == "Provider failure: Error code: 429 - quota exhausted\n"
+
+
+def test_a_provider_rejected_request_is_reported_as_non_retryable(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = run_cli(
+        capsys,
+        ["--schema", "tos", "-"],
+        source="Terms of Service source",
+        port_factory=StagedPort(
+            ProviderRejectedRequest(detail="Error code: 404 - model does not exist")
+        ),
+    )
+
+    assert result.exit_code == ExitCode.PROVIDER_REJECTED_REQUEST
+    assert result.stdout == ""
+    assert result.stderr == "Provider-rejected request: Error code: 404 - model does not exist\n"
+
+
 def test_an_unexpected_provider_error_uses_the_generic_failure_exit(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -321,6 +355,8 @@ def test_the_documented_exit_numbers_are_pinned() -> None:
         "VALIDATION_FAILURE": 2,
         "EMPTY_EXTRACTION": 3,
         "REFUSAL": 4,
+        "PROVIDER_FAILURE": 5,
+        "PROVIDER_REJECTED_REQUEST": 6,
     }
     # `IntEnum`, not `Enum`: `raise SystemExit(main())` hands a member straight to the
     # process status. Downgrading the base breaks that silently — nothing else fails.

@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from langchain_openai.chat_models.base import OpenAIRefusalError
+from openai import APIError, BadRequestError, NotFoundError, UnprocessableEntityError
 from pydantic import BaseModel
 
 
@@ -41,7 +42,28 @@ class Refusal:
     detail: str
 
 
-type Extraction = Extracted | EmptyExtraction | ValidationFailure | Refusal
+@dataclass(frozen=True, slots=True)
+class ProviderFailure:
+    """The provider could not serve a well-formed extraction request."""
+
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRejectedRequest:
+    """The provider rejected the extraction request as malformed."""
+
+    detail: str
+
+
+type Extraction = (
+    Extracted
+    | EmptyExtraction
+    | ValidationFailure
+    | Refusal
+    | ProviderFailure
+    | ProviderRejectedRequest
+)
 
 
 class ExtractionPort(Protocol):
@@ -58,7 +80,13 @@ def build_openai_port(model_id: str, debug: TextIO | None) -> ExtractionPort:
     load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     if not os.getenv("OPENAI_API_KEY"):
         raise ConfigurationError("missing OPENAI_API_KEY; set it in extractor/.env")
-    model = ChatOpenAI(model=model_id, reasoning_effort="none", temperature=0)
+    model = ChatOpenAI(
+        model=model_id,
+        reasoning_effort="none",
+        temperature=0,
+        timeout=60,
+        max_retries=2,
+    )
     prompt = ChatPromptTemplate.from_messages(
         [
             (
@@ -82,6 +110,10 @@ def build_openai_port(model_id: str, debug: TextIO | None) -> ExtractionPort:
             result = cast(dict[str, Any], chain.invoke({"document": document}))
         except OpenAIRefusalError as error:
             return Refusal(detail=str(error))
+        except (BadRequestError, NotFoundError, UnprocessableEntityError) as error:
+            return ProviderRejectedRequest(detail=str(error))
+        except APIError as error:
+            return ProviderFailure(detail=str(error))
         if debug is not None:
             debug.write(f"Raw model message: {result['raw']!r}\n")
         parsing_error = result["parsing_error"]
