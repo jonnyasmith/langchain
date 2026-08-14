@@ -1,7 +1,6 @@
 import argparse
 import sys
 from collections.abc import Sequence
-from pathlib import Path
 from typing import TextIO, assert_never
 
 from extractor.extraction import (
@@ -13,10 +12,10 @@ from extractor.extraction import (
     ValidationFailure,
     build_openai_port,
 )
+from extractor.intake import InputFailure, load_source_document
 from extractor.schemas import SCHEMAS
 
 DEFAULT_MODEL = "gpt-5-nano"
-MAX_DOCUMENT_CHARACTERS = 100_000
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -49,20 +48,9 @@ def main(
         valid_names = ", ".join(sorted(SCHEMAS))
         sys.stderr.write(f"Unknown schema {args.schema!r}. Valid schemas: {valid_names}.\n")
         return 1
-    try:
-        document = (
-            stdin.read() if args.input == "-" else Path(args.input).read_text(encoding="utf-8")
-        )
-    except OSError as error:
-        sys.stderr.write(f"Input file error for {args.input!r}: {error.strerror or error}.\n")
-        return 1
-    document_size = len(document)
-    if document_size > MAX_DOCUMENT_CHARACTERS:
-        sys.stderr.write(
-            "Document too large: "
-            f"maximum is {MAX_DOCUMENT_CHARACTERS:,} characters; "
-            f"received {document_size:,} characters.\n"
-        )
+    document = load_source_document(args.input, stdin)
+    if isinstance(document, InputFailure):
+        sys.stderr.write(document.message + "\n")
         return 1
     try:
         extract = port_factory(args.model, sys.stderr if args.debug else None)
