@@ -41,6 +41,10 @@ provider call and are deselected unless you ask for them:
 uv run pytest -m live
 ```
 
+Those tests need a funded key with access to the model under test, and they cost money. With
+no key they skip rather than fail, so read the count: `2 passed` means the provider really
+enforced the schema, while `2 skipped` means nothing was checked.
+
 ## Run
 
 Copy `.env.example` to `.env`, set `OPENAI_API_KEY`, then extract from a file:
