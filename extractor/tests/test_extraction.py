@@ -1,4 +1,5 @@
 from io import StringIO
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -190,3 +191,50 @@ def test_a_missing_api_key_fails_before_the_model_is_built(
         build_openai_port("gpt-5-nano", None)
 
     assert not provider.built
+
+
+def test_the_binding_asks_the_provider_to_enforce_the_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0001: enforcement is provider-side, so the binding arguments are the contract.
+
+    `strict=False` or a `method` of `function_calling` degrades enforcement to a polite
+    request with no error and no warning, and every other offline test still passes.
+    """
+    StubbedProvider(parsed_message(VALID_FACTS)).install(monkeypatch)
+    bindings: list[dict[str, Any]] = []
+    bind = ChatOpenAI.with_structured_output
+
+    def record(model: ChatOpenAI, schema: Any = None, **kwargs: Any) -> Any:
+        bindings.append({"schema": schema, **kwargs})
+        return bind(model, schema, **kwargs)
+
+    monkeypatch.setattr(ChatOpenAI, "with_structured_output", record)
+
+    port = build_openai_port("gpt-5-nano", None)
+    port("Terms of Service source", TermsOfService)
+
+    assert bindings == [
+        {
+            "schema": TermsOfService,
+            "method": "json_schema",
+            "strict": True,
+            "include_raw": True,
+        }
+    ]
+
+
+def test_the_key_is_read_from_the_app_local_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`extractor/.env`, so the key does not have to be exported into every shell."""
+    StubbedProvider(parsed_message(VALID_FACTS)).install(monkeypatch)
+    loaded: list[Path] = []
+
+    def record(path: Path) -> bool:
+        loaded.append(path)
+        return True
+
+    monkeypatch.setattr("extractor.extraction.load_dotenv", record)
+
+    build_openai_port("gpt-5-nano", None)
+
+    assert loaded == [Path(__file__).resolve().parents[1] / ".env"]

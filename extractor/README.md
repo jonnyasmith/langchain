@@ -43,7 +43,8 @@ uv run pytest -m live
 
 This makes one real OpenAI provider call and therefore costs money. Set a funded
 `OPENAI_API_KEY` with access to the configured model in the environment or in
-`extractor/.env` before running it.
+`extractor/.env` before running it. Without one the test skips with a warning naming
+what went unchecked, rather than failing.
 
 ## Run
 

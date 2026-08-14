@@ -8,7 +8,7 @@ from typing import NamedTuple, TextIO
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from extractor.__main__ import ExitCode, main
+from extractor.__main__ import DEFAULT_MODEL, ExitCode, main
 from extractor.extraction import (
     EmptyExtraction,
     Extracted,
@@ -35,8 +35,10 @@ class StagedPort:
         self.outcome = outcome
         self.debug: TextIO | None = None
         self.documents: list[str] = []
+        self.model_ids: list[str] = []
 
     def __call__(self, model_id: str, debug: TextIO | None) -> ExtractionPort:
+        self.model_ids.append(model_id)
         self.debug = debug
 
         def extract(document: str, schema: type[BaseModel]) -> Extraction:
@@ -323,3 +325,26 @@ def test_the_documented_exit_numbers_are_pinned() -> None:
     # `IntEnum`, not `Enum`: `raise SystemExit(main())` hands a member straight to the
     # process status. Downgrading the base breaks that silently — nothing else fails.
     assert isinstance(ExitCode.REFUSAL, int)
+
+
+def test_the_default_model_is_the_cheap_tier(capsys: pytest.CaptureFixture[str]) -> None:
+    staged = StagedPort(EmptyExtraction())
+
+    run_cli(capsys, ["--schema", "tos", "-"], source="source", port_factory=staged)
+
+    assert staged.model_ids == [DEFAULT_MODEL]
+
+
+def test_the_model_flag_overrides_the_default(capsys: pytest.CaptureFixture[str]) -> None:
+    """A document the default cannot handle is the reason the flag exists; nothing else in the
+    suite notices if the parsed value never reaches the port factory."""
+    staged = StagedPort(EmptyExtraction())
+
+    run_cli(
+        capsys,
+        ["--model", "gpt-5", "--schema", "tos", "-"],
+        source="source",
+        port_factory=staged,
+    )
+
+    assert staged.model_ids == ["gpt-5"]
