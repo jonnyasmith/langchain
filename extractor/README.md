@@ -4,16 +4,14 @@ CLI tool that turns messy raw text into a strictly typed JSON object.
 
 Feed it a scraped Terms of Service page or a cluttered email thread. A `ChatPromptTemplate` frames the task, the model is bound to a Pydantic schema with `.with_structured_output()`, and the result comes back as a validated object — no string parsing, no regex salvage of malformed JSON.
 
-## Features (planned)
+## Features
 
-- LCEL chain: prompt | model | structured output
-- Pydantic schemas as the extraction contract
-- Validation errors surfaced, not swallowed
-- Reads from a file or stdin
-
-## Status
-
-Not implemented.
+- Strict, provider-enforced Pydantic structured output
+- Named extraction schemas; `tos` ships with the tool
+- Validated JSON on stdout and diagnostics on stderr
+- Distinct validation, empty-extraction, and refusal outcomes
+- File and stdin input with a 100,000-character safety limit
+- App-local OpenAI configuration with a model override
 
 ## Requirements
 
@@ -45,6 +43,25 @@ uv run pytest -m live
 
 ## Run
 
+Copy `.env.example` to `.env`, set `OPENAI_API_KEY`, then extract from a file:
+
 ```bash
-uv run python -m extractor --schema tos FILE
+uv run python -m extractor --schema tos terms.html
 ```
+
+Read the source from stdin:
+
+```bash
+uv run python -m extractor --schema tos - < terms.html
+```
+
+List the available named schemas:
+
+```bash
+uv run python -m extractor --list-schemas
+```
+
+The default model is `gpt-5-nano`. Use `--model MODEL_ID` to override it and `--debug`
+to dump the raw model message to stderr. Successful extraction exits 0. Validation
+failure exits 2, empty extraction exits 3, provider refusal exits 4, and input,
+configuration, oversize, or unexpected failures exit 1.
