@@ -1,4 +1,4 @@
-"""Opt-in drift check against the real provider's strict schema binding."""
+"""Paid opt-in check that the real provider completes strict extraction."""
 
 import json
 from pathlib import Path
@@ -15,7 +15,7 @@ FIXTURE = Path(__file__).parent / "fixtures" / "terms.html"
 def test_live_extraction_returns_a_validated_object(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The entry-point seam returns an object validated by the requested schema."""
+    """The real provider completes extraction through the entry-point seam."""
     exit_code = main(["--schema", "tos", str(FIXTURE)])
 
     captured = capsys.readouterr()
@@ -23,5 +23,4 @@ def test_live_extraction_returns_a_validated_object(
     assert captured.err == ""
 
     payload = json.loads(captured.out)
-    extracted = TermsOfService.model_validate(payload)
-    assert isinstance(extracted, TermsOfService)
+    TermsOfService.model_validate(payload)
