@@ -1,14 +1,15 @@
-"""The extractor's one paid test: the real provider, with nothing substituted.
+"""The extractor's paid provider test and its offline outcome-classification tests.
 
-`pyproject.toml` sets `addopts = "--strict-markers -m 'not live'"`, so this is deselected by
-every default run and the offline rule in `AGENTS.md` holds unchanged. Run it deliberately,
-with a funded key in the environment or in `extractor/.env`:
+`pyproject.toml` sets `addopts = "--strict-markers -m 'not live'"`, so the paid test is
+deselected by every default run and the offline rule in `AGENTS.md` holds unchanged.
+Run it deliberately, with a funded key in the environment or in `extractor/.env`:
 
     uv run pytest -m live
 
 `method="json_schema", strict=True` (ADR-0001) is a provider-side guarantee, so no offline
-substitute can exercise it. Which fields this asserts, and which it deliberately leaves
-alone, is ADR-0003.
+substitute can exercise it. The offline tests cover only whether named provider outcomes
+skip or fail that contract. Which fields the paid test asserts, and which it deliberately
+leaves alone, is ADR-0003.
 """
 
 import json
@@ -35,7 +36,7 @@ from extractor.schemas import TermsOfService
 FIXTURE = Path(__file__).parent / "fixtures" / "terms.html"
 
 
-def staged_port(outcome: Extraction) -> PortFactory:
+def _staged_port(outcome: Extraction) -> PortFactory:
     """Build a port factory that returns one prepared live-test outcome."""
 
     def factory(_model_id: str, _debug: TextIO | None) -> ExtractionPort:
@@ -60,17 +61,17 @@ def _require_live_success(exit_code: ExitCode, stderr: str) -> None:
     assert exit_code is ExitCode.OK, stderr
 
 
+@pytest.fixture
 def configured_provider() -> None:
     """Skip loudly when there is no key — never let a live test look like it ran.
 
     Skipping beats failing: a contributor with no key must not be handed a red suite for a
     cost they did not opt into, and "skipped" is never read as "passed". pytest prints skip
-    reasons only under `-rs`, so the warning carries the reason into the warnings summary,
-    which a default run shows. `build_openai_port` owns the definition of "configured", so
-    asking it cannot drift from the code this guards. A fixture rather than a module-level
-    `skipif` for two reasons: an offline run deselects these tests rather than skipping them,
-    so it stays silent, and `load_dotenv` writes the key into `os.environ` process-wide, which
-    must not happen during collection of a run that never intended to call a provider.
+    reasons only under `-rs`, so the warning carries the reason into the warnings summary.
+    `build_openai_port` owns the definition of "configured", so asking it cannot drift from
+    the code this guards. A fixture rather than a module-level `skipif` means the default
+    offline tests never request it, and `load_dotenv` does not write the key into `os.environ`
+    during collection of a run that never intended to call a provider.
     """
     try:
         build_openai_port(DEFAULT_MODEL, None)
@@ -89,7 +90,7 @@ def test_a_provider_failure_skips_the_unchecked_live_contract(
 ) -> None:
     exit_code = main(
         ["--schema", "tos", str(FIXTURE)],
-        port_factory=staged_port(ProviderFailure(detail="Error code: 429 - quota exhausted")),
+        port_factory=_staged_port(ProviderFailure(detail="Error code: 429 - quota exhausted")),
     )
     captured = capsys.readouterr()
 
@@ -105,7 +106,7 @@ def test_a_provider_rejected_request_fails_the_live_contract(
 ) -> None:
     exit_code = main(
         ["--schema", "tos", str(FIXTURE)],
-        port_factory=staged_port(
+        port_factory=_staged_port(
             ProviderRejectedRequest(detail="Error code: 404 - model does not exist")
         ),
     )
