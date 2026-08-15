@@ -1,96 +1,69 @@
-# Extractor coding standards
+# Coding Standards
 
-Rules for changing code in this module. Every rule holds in the code today. Where an ADR is named,
-it is authoritative — `docs/adr/`.
+We write Python. These are the architectural and coding standards that keep our systems maintainable, readable, and resilient.
 
-## Errors and outcomes
+## 1. Dependency Management: Own Your Logic
 
-- MUST return a predictable failure as a value, never raise it: `load_source_document -> str | InputFailure`.
-- MUST model mutually exclusive results as a closed union of `@dataclass(frozen=True, slots=True)`
-  types, one per state, each with a docstring naming the state in domain terms. ADR-0002.
-- NEVER model states as one type with nullable fields a caller interrogates in order. ADR-0002.
-- MUST end every `match` over a union with `case unreachable: assert_never(unreachable)`.
-- MUST extend every `match` when adding a union member. NEVER delete an `assert_never` case as cleanup.
-- MUST store rendered detail as `str` on an outcome. NEVER store an exception instance.
-- MUST raise only for construction failure (`ConfigurationError`) or programmer error. An outcome is
-  never an exception.
-- NEVER write `except Exception` anywhere except the existing top-level net in `main`.
-- MUST make a return type carry its own guarantee, so no caller has to remember an ordering rule: a
-  `str` from intake has already cleared `MAX_DOCUMENT_CHARACTERS`.
+**Rule:** A little copying is better than a little dependency.
 
-## Seams
+* **Approach:** Before adding a third-party package for a minor utility, or a shared internal module for a handful of dataclasses, check whether the functionality fits in 20-50 lines of our own code.
+* **Rationale:** Every dependency adds supply chain risk, maintenance overhead, and tight coupling. We prefer isolated, duplicated utility logic over brittle, tightly coupled shared modules.
 
-- MUST declare a seam as a `Protocol` in the module that consumes it, not the module that implements it.
-- NEVER name a provider, vendor, or framework type in a seam's signature.
-- MUST keep a seam to one call. A second method means the boundary is wrong; do not widen the Protocol.
-- MUST accept the narrowest interface (`TextIO`, a factory `Callable`) and return a concrete type.
-- NEVER add a seam for an implementation that does not exist yet. ADR-0001.
-- NEVER add a second `ExtractionPort` implementation: it typechecks while silently dropping
-  `strict=True`. ADR-0001.
-- MUST keep a single-call-site, single-implementation helper a plain function — not a seam.
+## 2. Control Flow: Maintain "Line of Sight"
 
-## Framework containment
+**Rule:** Return early and avoid deep nesting.
 
-- MUST keep `with_structured_output`, `include_raw`, `parsing_error`, `OpenAIRefusalError`, prompt
-  assembly, and `strict=True` inside `extraction.py`. ADR-0002.
-- NEVER import LangChain, OpenAI, or provider types in `__main__.py`.
-- MUST confine `Any` and `cast` to the framework boundary, and reduce the result to a domain type
-  before returning it. The `cast(dict[str, Any], ...)` around `chain.invoke` is the only allowance.
-- MUST write every schema field as required and nullable with no default (`str | None`, never
-  `Optional[str] = None`) and give every field a description. ADR-0001.
+* **Approach:** Handle errors, edge cases, and preconditions at the top of the function using guard clauses. The happy path stays un-indented, running down the left of the screen.
+* **Rationale:** Deep `if`/`else` nesting increases cognitive load. Guard clauses make it immediately obvious what causes a function to exit.
 
-## Layout, naming, visibility
+## 3. Type Design: Robust Signatures
 
-- MUST keep `src/extractor/` flat: one module per responsibility. NEVER add `internal/`, `pkg/`,
-  `cmd/`, or packages by layer.
-- MUST prefix a module-private name with `_`. An unprefixed name is API.
-- MUST follow PEP 8 and the spellings in `docs/agents/domain.md`. NEVER use `Err`-prefixed error
-  names, `I`-prefixed interfaces, or abbreviated parameters.
-- MUST add a new domain term to `docs/agents/domain.md` in the change that introduces it.
-- MUST write a docstring that states a contract, an invariant, or a reason. NEVER restate the signature.
-- NEVER add module-level mutable state or import-time I/O. `load_dotenv` runs inside `build_openai_port`.
+**Rule:** Accept the most general type, return the most specific one.
 
-## Published contracts
+* **Approach:** Parameters should demand only the behaviour the function actually uses — take a `Protocol`, an `Iterable`, or a `Sequence` rather than a concrete class or a `list`. Return types should be concrete: a specific dataclass, a `list`, a named union.
+* **Rationale:** A narrow parameter type maximises flexibility for the caller, who can pass anything matching the shape. A concrete return type lets us add fields and methods later without breaking callers.
+* **Note:** This is about coupling, not input tolerance. We do not accept malformed input — see rule 6.
 
-- MUST treat `ExitCode` numbers as published: `README.md` documents them and a test pins them.
-  Renumbering a member is a breaking change.
-- MUST assign an outcome's status and diagnostic in `_report` and nowhere else.
-- MUST write the extracted object to stdout and every diagnostic to stderr.
-- MUST update `ARCHITECTURE.md` in the change that moves ownership between modules, reverses a
-  dependency, adds or removes an `Extraction` member, alters an exit number, or changes a hard
-  limit. It describes the module as it is; a stale description is read with the same trust as
-  a rule.
+## 4. Architecture: Favour Composition Over Inheritance
 
-## Tests
+**Rule:** Build complex behaviour by assembling small, focused components.
 
-- MUST write one test per contract, named as a sentence stating the behaviour.
-- MUST reach `main` through its injected seams — `port_factory`, `StringIO`, `tmp_path`. NEVER
-  subclass a framework type to reach `main`.
-- MUST mark any test that calls a provider `live`, and MUST keep the default run passing offline with
-  no API key.
-- MUST skip a `live` test with no key, with a message naming what went unchecked. NEVER let it fail
-  or silently pass. ADR-0003.
-- MUST assert a decision's invariant directly where behaviour would not catch it: the strict binding
-  arguments, the required-and-nullable field rule, the exit numbers.
-- NEVER reduce `tests/test_live.py` to a shape check. Assert field presence (an unanswered field is
-  null) and values with one faithful rendering; do not assert model wording. ADR-0003.
+* **Approach:** Avoid deep class hierarchies and abstract base classes. Inject single-purpose callables or `Protocol`-typed collaborators to combine behaviours.
+* **Rationale:** Inheritance trees become rigid and brittle. Composition lets us swap or fake a behaviour without untangling a family tree.
 
-## Rejected — do not propose these
+## 5. Error Handling: Predictable and Explicit Failures
 
-| Rejected | Use instead | Reason |
-| --- | --- | --- |
-| `(value, error)` pairs, generic `Result` | closed union + `match` + `assert_never` | Tuple returns substitute for absent sum types; this module has them. ADR-0002. |
-| Error check after every call | one funnel in the adapter | Framework code raises across the boundary anyway; per-call wrappers add noise, not safety. |
-| Wrapped error chains (`%w`, `errors.As`) | render detail to `str` at capture | No consumer inspects a cause; exception instances break outcome value-equality in tests. |
-| Discard writer replacing an optional debug stream | keep the `None` branch | The branch elides formatting a large raw message. |
-| `context.Context`-style threading | client configuration | One document, one call, one process. A timeout belongs on `ChatOpenAI`. |
-| Concurrency primitives | nothing | One document per invocation; splitting a document is `rag/`'s concern. |
-| Table-driven tests replacing named ones | one named test per contract | A sentence in the failure line beats a parametrised id. |
-| Vendoring a dependency | depend on it | LangChain and Pydantic are this module's product surface. |
-| A second provider adapter | nothing | Silently drops `strict=True`. ADR-0001. |
+**Rule:** Treat errors as expected values, not invisible control flow.
 
-## Verification
+* **Approach:** Reserve `raise` for genuinely unrecoverable states — a missing API key, a broken invariant. Model expected failures as named dataclasses in a union return type, one variant per outcome the caller must handle.
+* **Rationale:** The caller reads the signature and knows every way the call can fail, which forces them to acknowledge each one.
+* **Exhaustiveness:** Python does not check unions for us. Consume them with `match` and close the block with `case _ as unreachable: assert_never(unreachable)`, so mypy fails the build when a new variant appears.
 
-Commands, dependency-group rules, the lockfile rule, and the single-config-file rule live in
-`AGENTS.md`. Style is settled by `uv run ruff format .` and `uv run ruff check .`; this document adds
-no rule a formatter enforces.
+### Third-party boundaries
+
+Libraries raise. LangChain and the OpenAI SDK signal expected failures — refusals, malformed requests, upstream errors — as exceptions, so the only way to honour this rule is to catch them and map them into our own outcomes.
+
+* **Approach:** Wrap the third-party call in a thin translation layer that catches its exceptions and returns our variants. Keep the layer thin: catch, map, return. No business logic. Everything above the boundary sees only the union.
+* **This is compliance, not an exemption.** The boundary function is where exceptions stop, which is precisely what lets the rest of the module treat errors as values.
+* **The union is only as complete as the `except` clauses.** Nothing verifies that we caught everything the library can raise, and the surface shifts on upgrade. Where an escaped exception would be worse than a swallowed bug, close the boundary with a final `except Exception` mapping to a generic failure variant. Make that call deliberately.
+
+## 6. Type Safety: Avoid the Escape Hatch
+
+**Rule:** The empty type says nothing.
+
+* **Approach:** Do not reach for `Any`, a bare `dict[str, Any]`, or `cast` to silence the type checker. Where a value is genuinely unknown, narrow it with `isinstance` before use. Where a library forces our hand — an untyped return we must reshape — confine the `cast` to the boundary and give the result a typed shape immediately.
+* **Rationale:** Bypassing the type system converts build-time errors into production crashes.
+
+## 7. Resource Management: Clean Up Deterministically
+
+**Rule:** Acquisition and release belong in the same lexical scope.
+
+* **Approach:** Open files, acquire locks, and establish connections with `with`. Where setup and teardown are non-trivial, write a `@contextmanager` so both halves sit in one function and callers get a single `with` block.
+* **Rationale:** Relying on reference counting for unmanaged resources, or putting cleanup at the bottom of a long function, guarantees leaks on the error path.
+
+## 8. Testing: One Behaviour Per Test
+
+**Rule:** Name the behaviour in the test; parametrise only over data.
+
+* **Approach:** Default to a separate test per behaviour, named as a sentence stating what must hold — `test_a_missing_path_is_a_named_input_failure`. Reach for `@pytest.mark.parametrize` when the cases differ only in their inputs and share one assertion, such as boundary values or encoding variants.
+* **Rationale:** pytest reports the failing test by name and introspects the failing assertion, so a descriptive test tells us what broke without opening the file. Collapsing behaviours that assert different things into one table hides that signal and couples unrelated cases to a single assertion.
