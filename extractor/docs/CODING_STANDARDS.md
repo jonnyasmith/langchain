@@ -22,6 +22,7 @@ We write Python. These are the architectural and coding standards that keep our 
 
 * **Approach:** Parameters should demand only the behaviour the function actually uses — take a `Protocol`, an `Iterable`, or a `Sequence` rather than a concrete class or a `list`. Return types should be concrete: a specific dataclass, a `list`, a named union.
 * **Rationale:** A narrow parameter type maximises flexibility for the caller, who can pass anything matching the shape. A concrete return type lets us add fields and methods later without breaking callers.
+* **Closures:** A function that returns a closure is the exception. A closure has no denotable concrete type, so a callable `Protocol` is the most specific type available and is the correct return annotation.
 * **Note:** This is about coupling, not input tolerance. We do not accept malformed input — see rule 6.
 
 ## 4. Architecture: Favour Composition Over Inheritance
