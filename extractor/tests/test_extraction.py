@@ -1,20 +1,25 @@
-"""Offline adapter tests, all through the substituted chat-model seam.
+"""Offline adapter tests. No test here reaches a provider or the network.
 
-No test here reaches a provider or the network; the one test that needs a real HTTP request
-binds a loopback server of its own. Each adapter's provider chat-model class is replaced by a
-recording builder that returns a canned real subclass, because the structured-output parsing
-that decides an outcome runs inside the provider package and only runs on a real subclass.
+Two seams, deliberately.
 
-OpenAI and OpenRouter share `ChatOpenAI`, so their tests are told apart by what the recorded
-configuration contains: the base URL, the routing guard, and the reasoning channel.
+Outcome tests build a `ProviderAdapter` whose `build_model` returns a canned chat model. That
+is the seam `main` itself crosses, so they need no API key, no environment, and no patching of
+the module's namespace. The canned model is a real `ChatOpenAI` or `ChatAnthropic` subclass,
+because the structured-output parsing that decides an outcome runs inside the provider package
+and only runs on a real subclass.
 
-The two SDKs do not even share an HTTP library — `openai` carries `httpx2` and `anthropic`
-carries `httpx` — so provider errors are built with the flavour their own SDK expects.
+Configuration tests are the exception: they exist to pin the arguments handed to the SDK class,
+which is visible nowhere else, so they substitute that class in this module's namespace and call
+the registry's model builder directly. The one test that needs a real HTTP request binds a
+loopback server of its own.
+
+OpenAI and OpenRouter share one integration, so at the outcome seam they share their outcomes;
+what differs is the model each builds, which the configuration tests cover. The two SDKs do not
+even share an HTTP library — `openai` carries `httpx2` and `anthropic` carries `httpx` — so
+provider errors are built with the flavour their own SDK expects.
 """
 
 import json
-import os
-import re
 import threading
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,6 +33,7 @@ import httpx2
 import pytest
 from langchain_anthropic import ChatAnthropic
 from langchain_core.callbacks.manager import CallbackManagerForLLMRun
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_openai import ChatOpenAI
@@ -42,22 +48,22 @@ from openai import (
 from pydantic import SecretStr
 
 from extractor import extraction
+from extractor.credentials import ConfigurationError
 from extractor.extraction import (
-    ConfigurationError,
+    ANTHROPIC,
+    OPENAI_FAMILY,
+    PROVIDERS,
     EmptyExtraction,
     Extracted,
     Extraction,
-    PortFactory,
+    Integration,
     PortSettings,
+    ProviderAdapter,
     ProviderFailure,
     ProviderRejectedRequest,
     ReasoningLevel,
     Refusal,
     ValidationFailure,
-    _load_env_file,
-    build_anthropic_port,
-    build_openai_port,
-    build_openrouter_port,
 )
 from extractor.schemas import TermsOfService
 
@@ -113,18 +119,21 @@ class CannedAnthropicChatModel(ChatAnthropic):
         return ChatResult(generations=[ChatGeneration(message=self.response)])
 
 
-class StubbedProvider:
-    """Substitutes the chat-model class an adapter builds, and records how it was configured."""
+class StubbedModelClass:
+    """Substitutes the chat-model class a builder constructs, and records its arguments.
+
+    Only the configuration tests need this. Everything that asserts an *outcome* goes through
+    `canned_provider` instead, which needs no patching because the model builder is a field on
+    the provider record.
+    """
 
     def __init__(
         self,
-        response: AIMessage | BaseException,
         *,
         target: str = "ChatOpenAI",
         canned: Callable[..., Any] = CannedOpenAIChatModel,
         api_key: str = "OPENAI_API_KEY",
     ) -> None:
-        self.response = response
         self.target = target
         self.canned = canned
         self.api_key = api_key
@@ -137,62 +146,51 @@ class StubbedProvider:
         def build(**configuration: Any) -> Any:
             self.configuration = configuration
             self.built = True
-            # The adapter may already have supplied a key; only fill one in when it did not.
+            # The builder may already have supplied a key; only fill one in when it did not.
             return self.canned(
-                **{"api_key": SecretStr("test-key"), **configuration}, response=self.response
+                **{"api_key": SecretStr("test-key"), **configuration},
+                response=AIMessage(content=""),
             )
 
         monkeypatch.setattr(f"extractor.extraction.{self.target}", build)
 
 
-def openai_stub(response: AIMessage | BaseException) -> StubbedProvider:
-    return StubbedProvider(response)
+def canned_provider(
+    response: AIMessage | BaseException,
+    *,
+    integration: Integration = OPENAI_FAMILY,
+    canned: Callable[..., BaseChatModel] = CannedOpenAIChatModel,
+) -> ProviderAdapter:
+    """A provider record whose model builder returns a canned chat model.
+
+    This is the seam `main` crosses, so an outcome test needs no API key, no environment, and
+    no patching of this module's namespace — it supplies a `build_model` and reads the outcome.
+    """
+
+    def build_model(settings: PortSettings) -> BaseChatModel:
+        return canned(model=settings.model_id, api_key=SecretStr("test-key"), response=response)
+
+    return ProviderAdapter("canned-model", build_model, integration)
 
 
-def openrouter_stub(response: AIMessage | BaseException) -> StubbedProvider:
-    return StubbedProvider(response, api_key="OPENROUTER_API_KEY")
-
-
-def anthropic_stub(response: AIMessage | BaseException) -> StubbedProvider:
-    return StubbedProvider(
-        response,
-        target="ChatAnthropic",
-        canned=CannedAnthropicChatModel,
-        api_key="ANTHROPIC_API_KEY",
-    )
+def extract_through(provider: ProviderAdapter, *, debug: StringIO | None = None) -> Extraction:
+    port = provider.build_port(PortSettings(provider.default_model, ReasoningLevel.MEDIUM, debug))
+    return port("Terms of Service source", TermsOfService)
 
 
 def extract_through_openai(
-    monkeypatch: pytest.MonkeyPatch,
-    response: AIMessage | BaseException,
-    *,
-    debug: StringIO | None = None,
+    response: AIMessage | BaseException, *, debug: StringIO | None = None
 ) -> Extraction:
-    openai_stub(response).install(monkeypatch)
-    port = build_openai_port(PortSettings("gpt-5-nano", ReasoningLevel.MEDIUM, debug))
-    return port("Terms of Service source", TermsOfService)
-
-
-def extract_through_openrouter(
-    monkeypatch: pytest.MonkeyPatch,
-    response: AIMessage | BaseException,
-    *,
-    debug: StringIO | None = None,
-) -> Extraction:
-    openrouter_stub(response).install(monkeypatch)
-    port = build_openrouter_port(PortSettings("openai/gpt-5-nano", ReasoningLevel.MEDIUM, debug))
-    return port("Terms of Service source", TermsOfService)
+    return extract_through(canned_provider(response), debug=debug)
 
 
 def extract_through_anthropic(
-    monkeypatch: pytest.MonkeyPatch,
-    response: AIMessage | BaseException,
-    *,
-    debug: StringIO | None = None,
+    response: AIMessage | BaseException, *, debug: StringIO | None = None
 ) -> Extraction:
-    anthropic_stub(response).install(monkeypatch)
-    port = build_anthropic_port(PortSettings("claude-sonnet-5", ReasoningLevel.MEDIUM, debug))
-    return port("Terms of Service source", TermsOfService)
+    return extract_through(
+        canned_provider(response, integration=ANTHROPIC, canned=CannedAnthropicChatModel),
+        debug=debug,
+    )
 
 
 def parsed_message(facts: dict[str, object]) -> AIMessage:
@@ -219,114 +217,98 @@ def anthropic_error(
     return kind(message, response=httpx.Response(status, request=request), body=None)
 
 
-def test_a_parsed_object_is_an_extracted_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
-    outcome = extract_through_openai(monkeypatch, parsed_message(VALID_FACTS))
+def test_a_parsed_object_is_an_extracted_outcome() -> None:
+    outcome = extract_through_openai(parsed_message(VALID_FACTS))
 
     assert outcome == Extracted(TermsOfService.model_validate(VALID_FACTS))
 
 
-def test_an_answer_carrying_no_object_is_an_empty_extraction_and_never_raises(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_an_answer_carrying_no_object_is_an_empty_extraction_and_never_raises() -> None:
     answered_without_committing = AIMessage(
         content="",
         tool_calls=[{"name": "TermsOfService", "args": {}, "id": "call-1", "type": "tool_call"}],
     )
 
-    outcome = extract_through_openai(monkeypatch, answered_without_committing)
+    outcome = extract_through_openai(answered_without_committing)
 
     assert outcome == EmptyExtraction()
 
 
-def test_an_object_the_schema_rejects_is_a_validation_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    outcome = extract_through_openai(
-        monkeypatch, parsed_message({**VALID_FACTS, "effective_date": "nope"})
-    )
+def test_an_object_the_schema_rejects_is_a_validation_failure() -> None:
+    outcome = extract_through_openai(parsed_message({**VALID_FACTS, "effective_date": "nope"}))
 
     assert isinstance(outcome, ValidationFailure)
     assert "effective_date" in outcome.detail
 
 
-def test_a_refusal_carried_by_the_raw_message_is_a_refusal_not_a_validation_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_refusal_carried_by_the_raw_message_is_a_refusal_not_a_validation_failure() -> None:
     refused = AIMessage(
         content="",
         additional_kwargs={"refusal": "The provider declined this extraction."},
     )
 
-    outcome = extract_through_openai(monkeypatch, refused)
+    outcome = extract_through_openai(refused)
 
     assert isinstance(outcome, Refusal)
     assert "declined" in outcome.detail
 
 
-def test_a_refusal_raised_by_the_provider_is_a_refusal(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    outcome = extract_through_openai(
-        monkeypatch, OpenAIRefusalError("The provider declined this extraction.")
-    )
+def test_a_refusal_raised_by_the_provider_is_a_refusal() -> None:
+    outcome = extract_through_openai(OpenAIRefusalError("The provider declined this extraction."))
 
     assert isinstance(outcome, Refusal)
     assert "declined" in outcome.detail
 
 
-def test_a_refusal_passed_through_by_the_aggregator_is_a_refusal(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_refusal_carried_on_the_message_is_read_by_the_openai_family_refusal_reader() -> None:
     """Reachable through OpenRouter, not guaranteed: the refusal is read off a message field
-    any OpenAI-format response may carry, so it depends on the upstream provider sending it."""
+    any OpenAI-format response may carry, so it depends on the upstream provider sending it.
+    ADR-0004. The aggregator inherits this reader whole, which the registry test above pins."""
     refused = AIMessage(
         content="",
         additional_kwargs={"refusal": "The upstream provider declined this extraction."},
     )
 
-    outcome = extract_through_openrouter(monkeypatch, refused)
+    outcome = extract_through_openai(refused)
 
     assert isinstance(outcome, Refusal)
     assert "declined" in outcome.detail
 
 
-def test_an_anthropic_stop_reason_of_refusal_is_a_refusal(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_an_anthropic_stop_reason_of_refusal_is_a_refusal() -> None:
     """Anthropic reports a refusal nowhere else. `stop_reason` reaches `response_metadata`
     because `langchain_core` merges the generation's `llm_output` into it."""
     refused = AIMessage(content="", response_metadata={"stop_reason": "refusal"})
 
-    outcome = extract_through_anthropic(monkeypatch, refused)
+    outcome = extract_through_anthropic(refused)
 
     assert outcome == Refusal(detail="the model stopped with stop reason 'refusal'")
 
 
-def test_an_anthropic_json_object_is_an_extracted_outcome(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    outcome = extract_through_anthropic(monkeypatch, anthropic_message(VALID_FACTS))
+def test_an_anthropic_json_object_is_an_extracted_outcome() -> None:
+    outcome = extract_through_anthropic(anthropic_message(VALID_FACTS))
 
     assert outcome == Extracted(TermsOfService.model_validate(VALID_FACTS))
 
 
-def test_an_anthropic_object_the_schema_rejects_is_a_validation_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_an_anthropic_object_the_schema_rejects_is_a_validation_failure() -> None:
     outcome = extract_through_anthropic(
-        monkeypatch, anthropic_message({**VALID_FACTS, "effective_date": "nope"})
+        anthropic_message({**VALID_FACTS, "effective_date": "nope"})
     )
 
     assert isinstance(outcome, ValidationFailure)
     assert "effective_date" in outcome.detail
 
 
-def test_an_openrouter_parsed_object_is_an_extracted_outcome(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    outcome = extract_through_openrouter(monkeypatch, parsed_message(VALID_FACTS))
-
-    assert outcome == Extracted(TermsOfService.model_validate(VALID_FACTS))
+def test_the_aggregator_is_registered_with_the_openai_family_integration() -> None:
+    """This is the whole of what OpenRouter shares: one binding, one exception funnel, one
+    refusal reader. Asserting it here is what lets every OpenAI outcome test count for the
+    aggregator too — re-running those tests against an identically built canned model would
+    assert nothing, because at this seam the two are the same code.
+    """
+    assert PROVIDERS["openrouter"].integration is OPENAI_FAMILY
+    assert PROVIDERS["openai"].integration is OPENAI_FAMILY
+    assert PROVIDERS["anthropic"].integration is ANTHROPIC
 
 
 @pytest.mark.parametrize(
@@ -334,17 +316,16 @@ def test_an_openrouter_parsed_object_is_an_extracted_outcome(
     [
         (extract_through_openai, parsed_message(VALID_FACTS)),
         (extract_through_anthropic, anthropic_message(VALID_FACTS)),
-        (extract_through_openrouter, parsed_message(VALID_FACTS)),
     ],
 )
-def test_the_debug_stream_receives_the_raw_provider_message_on_every_provider(
+def test_the_debug_stream_receives_the_raw_provider_message_on_every_integration(
     monkeypatch: pytest.MonkeyPatch,
     extract: Callable[..., Extraction],
     response: AIMessage,
 ) -> None:
     debug = StringIO()
 
-    extract(monkeypatch, response, debug=debug)
+    extract(response, debug=debug)
 
     dumped = debug.getvalue()
     assert dumped.startswith("Raw model message: ")
@@ -356,7 +337,6 @@ def test_the_debug_stream_receives_the_raw_provider_message_on_every_provider(
     [
         (extract_through_openai, parsed_message(VALID_FACTS)),
         (extract_through_anthropic, anthropic_message(VALID_FACTS)),
-        (extract_through_openrouter, parsed_message(VALID_FACTS)),
     ],
 )
 def test_without_a_debug_stream_no_adapter_writes_to_stdout_or_stderr(
@@ -366,7 +346,7 @@ def test_without_a_debug_stream_no_adapter_writes_to_stdout_or_stderr(
     response: AIMessage,
 ) -> None:
     """`_report` is the sole writer of extraction output, on every provider."""
-    extract(monkeypatch, response)
+    extract(response)
 
     assert capsys.readouterr() == ("", "")
 
@@ -385,12 +365,12 @@ def test_each_reasoning_level_reaches_openai_in_its_own_spelling(
     reasoning: ReasoningLevel,
     provider_spelling: str,
 ) -> None:
-    provider = openai_stub(parsed_message(VALID_FACTS))
-    provider.install(monkeypatch)
+    model_class = StubbedModelClass()
+    model_class.install(monkeypatch)
 
-    build_openai_port(PortSettings("gpt-5-mini", reasoning, None))
+    PROVIDERS["openai"].build_model(PortSettings("gpt-5-mini", reasoning, None))
 
-    assert provider.configuration == {
+    assert model_class.configuration == {
         "model": "gpt-5-mini",
         "reasoning_effort": provider_spelling,
         "temperature": 0,
@@ -416,12 +396,14 @@ def test_each_reasoning_level_reaches_anthropic_in_its_own_spelling(
     thinking: dict[str, str] | None,
     effort: str | None,
 ) -> None:
-    provider = anthropic_stub(anthropic_message(VALID_FACTS))
-    provider.install(monkeypatch)
+    model_class = StubbedModelClass(
+        target="ChatAnthropic", canned=CannedAnthropicChatModel, api_key="ANTHROPIC_API_KEY"
+    )
+    model_class.install(monkeypatch)
 
-    build_anthropic_port(PortSettings("claude-sonnet-5", reasoning, None))
+    PROVIDERS["anthropic"].build_model(PortSettings("claude-sonnet-5", reasoning, None))
 
-    assert provider.configuration == {
+    assert model_class.configuration == {
         "model": "claude-sonnet-5",
         "thinking": thinking,
         "reasoning_effort": effort,
@@ -444,12 +426,12 @@ def test_each_reasoning_level_reaches_openrouter_through_the_extra_body_channel(
     reasoning: ReasoningLevel,
     provider_spelling: str,
 ) -> None:
-    provider = openrouter_stub(parsed_message(VALID_FACTS))
-    provider.install(monkeypatch)
+    model_class = StubbedModelClass(api_key="OPENROUTER_API_KEY")
+    model_class.install(monkeypatch)
 
-    build_openrouter_port(PortSettings("openai/gpt-5-nano", reasoning, None))
+    PROVIDERS["openrouter"].build_model(PortSettings("openai/gpt-5-nano", reasoning, None))
 
-    assert provider.configuration["extra_body"] == {
+    assert model_class.configuration["extra_body"] == {
         "provider": {"require_parameters": True},
         "reasoning": {"effort": provider_spelling},
     }
@@ -466,12 +448,14 @@ def test_the_openrouter_model_is_configured_for_the_aggregator_and_nothing_else(
     default model's endpoint does not advertise temperature, so sending it would leave the
     aggregator with no endpoint able to enforce the schema.
     """
-    provider = openrouter_stub(parsed_message(VALID_FACTS))
-    provider.install(monkeypatch)
+    model_class = StubbedModelClass(api_key="OPENROUTER_API_KEY")
+    model_class.install(monkeypatch)
 
-    build_openrouter_port(PortSettings("openai/gpt-5-nano", ReasoningLevel.MEDIUM, None))
+    PROVIDERS["openrouter"].build_model(
+        PortSettings("openai/gpt-5-nano", ReasoningLevel.MEDIUM, None)
+    )
 
-    assert provider.configuration == {
+    assert model_class.configuration == {
         "model": "openai/gpt-5-nano",
         "base_url": "https://openrouter.ai/api/v1",
         "api_key": SecretStr("test-key"),
@@ -486,21 +470,22 @@ def test_the_openrouter_model_is_configured_for_the_aggregator_and_nothing_else(
 
 
 @pytest.mark.parametrize(
-    ("build", "key"),
+    ("provider", "key"),
     [
-        (build_openai_port, "OPENAI_API_KEY"),
-        (build_anthropic_port, "ANTHROPIC_API_KEY"),
-        (build_openrouter_port, "OPENROUTER_API_KEY"),
+        ("openai", "OPENAI_API_KEY"),
+        ("anthropic", "ANTHROPIC_API_KEY"),
+        ("openrouter", "OPENROUTER_API_KEY"),
     ],
 )
 def test_each_adapter_checks_only_its_own_key_before_building_the_model(
     monkeypatch: pytest.MonkeyPatch,
-    build: PortFactory,
+    tmp_path: Path,
+    provider: str,
     key: str,
 ) -> None:
     """Every other provider's key is present and does not help, and the message names both the
     missing key and where to put it. Nothing is constructed, so a misconfigured run is free."""
-    monkeypatch.setattr("extractor.extraction._load_env_file", lambda _: None)
+    monkeypatch.setattr("extractor.credentials.ENV_FILE", tmp_path / "absent.env")
     for other in ALL_KEYS:
         monkeypatch.setenv(other, "test-key")
     monkeypatch.delenv(key, raising=False)
@@ -509,34 +494,42 @@ def test_each_adapter_checks_only_its_own_key_before_building_the_model(
         monkeypatch.setattr(f"extractor.extraction.{target}", lambda **_: built.append("built"))
 
     with pytest.raises(ConfigurationError, match=rf"{key}.*extractor/\.env"):
-        build(PortSettings("any-model", ReasoningLevel.MEDIUM, None))
+        PROVIDERS[provider].build_model(PortSettings("any-model", ReasoningLevel.MEDIUM, None))
 
     assert built == []
 
 
 @pytest.mark.parametrize(
-    ("build", "key"),
+    ("provider", "key"),
     [
-        (build_openai_port, "OPENAI_API_KEY"),
-        (build_anthropic_port, "ANTHROPIC_API_KEY"),
-        (build_openrouter_port, "OPENROUTER_API_KEY"),
+        ("openai", "OPENAI_API_KEY"),
+        ("anthropic", "ANTHROPIC_API_KEY"),
+        ("openrouter", "OPENROUTER_API_KEY"),
     ],
 )
-def test_each_adapter_reads_its_key_from_the_app_local_dotenv(
+def test_each_adapter_takes_its_key_from_the_credentials_file_not_the_shell(
     monkeypatch: pytest.MonkeyPatch,
-    build: PortFactory,
+    tmp_path: Path,
+    provider: str,
     key: str,
 ) -> None:
-    """`extractor/.env`, so no key has to be exported into every shell."""
-    monkeypatch.setenv(key, "test-key")
+    """No key is exported, so the adapter can only build if it resolved one from the file.
+
+    `test_credentials.py` pins where that file lives; this pins that every adapter goes
+    through it rather than reading the environment directly.
+    """
+    for name in ALL_KEYS:
+        monkeypatch.delenv(name, raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{key}=file-key\n", encoding="utf-8")
+    monkeypatch.setattr("extractor.credentials.ENV_FILE", env_file)
+    built: list[str] = []
     for target in ("ChatOpenAI", "ChatAnthropic"):
-        monkeypatch.setattr(f"extractor.extraction.{target}", lambda **_: None)
-    loaded: list[Path] = []
-    monkeypatch.setattr("extractor.extraction._load_env_file", loaded.append)
+        monkeypatch.setattr(f"extractor.extraction.{target}", lambda **_: built.append("built"))
 
-    build(PortSettings("any-model", ReasoningLevel.MEDIUM, None))
+    PROVIDERS[provider].build_model(PortSettings("any-model", ReasoningLevel.MEDIUM, None))
 
-    assert loaded == [Path(__file__).resolve().parents[1] / ".env"]
+    assert built == ["built"]
 
 
 def test_the_openai_binding_asks_the_provider_to_enforce_the_schema(
@@ -547,30 +540,9 @@ def test_the_openai_binding_asks_the_provider_to_enforce_the_schema(
     `strict=False` or a `method` of `function_calling` degrades enforcement to a polite
     request with no error and no warning, and every other offline test still passes.
     """
-    openai_stub(parsed_message(VALID_FACTS)).install(monkeypatch)
     bindings = record_bindings(monkeypatch, ChatOpenAI)
 
-    port = build_openai_port(PortSettings("gpt-5-nano", ReasoningLevel.MEDIUM, None))
-    port("Terms of Service source", TermsOfService)
-
-    assert bindings == [
-        {
-            "schema": TermsOfService,
-            "method": "json_schema",
-            "strict": True,
-            "include_raw": True,
-        }
-    ]
-
-
-def test_the_openrouter_binding_asks_the_aggregator_to_enforce_the_schema(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    openrouter_stub(parsed_message(VALID_FACTS)).install(monkeypatch)
-    bindings = record_bindings(monkeypatch, ChatOpenAI)
-
-    port = build_openrouter_port(PortSettings("openai/gpt-5-nano", ReasoningLevel.MEDIUM, None))
-    port("Terms of Service source", TermsOfService)
+    extract_through_openai(parsed_message(VALID_FACTS))
 
     assert bindings == [
         {
@@ -590,11 +562,9 @@ def test_the_anthropic_binding_enforces_through_json_schema_never_function_calli
     `function_calling` must never appear here. It forces tool choice, which the provider
     rejects when thinking is enabled — and thinking is on at every named reasoning level.
     """
-    anthropic_stub(anthropic_message(VALID_FACTS)).install(monkeypatch)
     bindings = record_bindings(monkeypatch, ChatAnthropic)
 
-    port = build_anthropic_port(PortSettings("claude-sonnet-5", ReasoningLevel.MEDIUM, None))
-    port("Terms of Service source", TermsOfService)
+    extract_through_anthropic(anthropic_message(VALID_FACTS))
 
     assert bindings == [
         {
@@ -681,7 +651,9 @@ def test_the_routing_guard_and_reasoning_arrive_as_top_level_request_fields(
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr(extraction, "_OPENROUTER_BASE_URL", aggregator_stub["base_url"])
 
-    port = build_openrouter_port(PortSettings("openai/gpt-5-nano", ReasoningLevel.MEDIUM, None))
+    port = PROVIDERS["openrouter"].build_port(
+        PortSettings("openai/gpt-5-nano", ReasoningLevel.MEDIUM, None)
+    )
     outcome = port("Terms of Service source", TermsOfService)
 
     assert outcome == Extracted(TermsOfService.model_validate(VALID_FACTS))
@@ -705,7 +677,7 @@ def test_each_rejected_request_class_becomes_a_provider_rejected_request(
     monkeypatch: pytest.MonkeyPatch,
     error: APIError,
 ) -> None:
-    outcome = extract_through_openai(monkeypatch, error)
+    outcome = extract_through_openai(error)
 
     assert outcome == ProviderRejectedRequest(detail=str(error))
 
@@ -722,47 +694,42 @@ def test_each_anthropic_rejected_request_class_becomes_a_provider_rejected_reque
     monkeypatch: pytest.MonkeyPatch,
     error: anthropic.APIError,
 ) -> None:
-    outcome = extract_through_anthropic(monkeypatch, error)
+    outcome = extract_through_anthropic(error)
 
     assert outcome == ProviderRejectedRequest(detail=str(error))
 
 
-def test_the_provider_family_base_class_becomes_a_provider_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_the_provider_family_base_class_becomes_a_provider_failure() -> None:
     error = APIError(
         "provider unavailable",
         request=httpx2.Request("POST", "https://provider.test"),
         body=None,
     )
 
-    outcome = extract_through_openai(monkeypatch, error)
+    outcome = extract_through_openai(error)
 
     assert outcome == ProviderFailure(detail=str(error))
 
 
-def test_the_anthropic_family_base_class_becomes_a_provider_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_the_anthropic_family_base_class_becomes_a_provider_failure() -> None:
     error = anthropic.APIError(
         "provider unavailable",
         request=httpx.Request("POST", "https://provider.test"),
         body=None,
     )
 
-    outcome = extract_through_anthropic(monkeypatch, error)
+    outcome = extract_through_anthropic(error)
 
     assert outcome == ProviderFailure(detail=str(error))
 
 
-def test_exhausted_aggregator_credit_becomes_a_provider_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_exhausted_aggregator_credit_becomes_a_provider_failure() -> None:
     """It has no named subclass, so it falls through to the base class — which is right, since
-    re-running after topping up succeeds."""
+    re-running after topping up succeeds. Raised by the aggregator, funnelled by the OpenAI
+    family integration it is registered with."""
     credit_exhausted = openai_error(APIStatusError, "insufficient credits", 402)
 
-    outcome = extract_through_openrouter(monkeypatch, credit_exhausted)
+    outcome = extract_through_openai(credit_exhausted)
 
     assert outcome == ProviderFailure(detail=str(credit_exhausted))
 
@@ -771,82 +738,17 @@ def test_exhausted_aggregator_credit_becomes_a_provider_failure(
     ("extract", "error"),
     [
         (extract_through_openai, openai_error(NotFoundError, "model does not exist", 404)),
-        (extract_through_openrouter, openai_error(NotFoundError, "model does not exist", 404)),
         (
             extract_through_anthropic,
             anthropic_error(anthropic.NotFoundError, "model does not exist", 404),
         ),
     ],
 )
-def test_an_unknown_model_id_is_a_provider_rejected_request_on_every_provider(
+def test_an_unknown_model_id_is_a_provider_rejected_request_on_every_integration(
     monkeypatch: pytest.MonkeyPatch,
     extract: Callable[..., Extraction],
     error: BaseException,
 ) -> None:
-    outcome = extract(monkeypatch, error)
+    outcome = extract(error)
 
     assert outcome == ProviderRejectedRequest(detail=str(error))
-
-
-def test_the_env_file_defines_a_key_the_environment_lacks(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    env_file = tmp_path / ".env"
-    env_file.write_text('OPENAI_API_KEY="file-key"\n', encoding="utf-8")
-
-    _load_env_file(env_file)
-
-    assert os.environ["OPENAI_API_KEY"] == "file-key"
-
-
-def test_an_exported_key_beats_the_env_file(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The shell is the operator's override; a stale file must not shadow it."""
-    monkeypatch.setenv("OPENAI_API_KEY", "exported-key")
-    env_file = tmp_path / ".env"
-    env_file.write_text("OPENAI_API_KEY=file-key\n", encoding="utf-8")
-
-    _load_env_file(env_file)
-
-    assert os.environ["OPENAI_API_KEY"] == "exported-key"
-
-
-def test_the_env_file_ignores_blank_lines_and_comments(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "\n# OPENAI_API_KEY=commented-out\n\nOPENAI_API_KEY=file-key\n", encoding="utf-8"
-    )
-
-    _load_env_file(env_file)
-
-    assert os.environ["OPENAI_API_KEY"] == "file-key"
-
-
-def test_a_missing_env_file_is_not_an_error(tmp_path: Path) -> None:
-    """Returning rather than raising is the assertion: a first run has no `.env` and the key
-    may be exported instead, so an absent file must not fail the extractor."""
-    _load_env_file(tmp_path / ".env")
-
-
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 file regardless")
-def test_an_unreadable_env_file_is_a_configuration_error(tmp_path: Path) -> None:
-    """A present-but-unreadable file is a misconfiguration, not an `Unexpected error`."""
-    env_file = tmp_path / ".env"
-    env_file.write_text("OPENAI_API_KEY=file-key\n", encoding="utf-8")
-    env_file.chmod(0o000)
-
-    with pytest.raises(ConfigurationError, match=re.escape(str(env_file))):
-        _load_env_file(env_file)
-
-
-def test_a_non_utf8_env_file_is_a_configuration_error(tmp_path: Path) -> None:
-    env_file = tmp_path / ".env"
-    env_file.write_bytes(b"OPENAI_API_KEY=caf\xe9\n")
-
-    with pytest.raises(ConfigurationError, match=re.escape(str(env_file))):
-        _load_env_file(env_file)

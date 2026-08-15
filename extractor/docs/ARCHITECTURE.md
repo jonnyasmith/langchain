@@ -2,7 +2,7 @@
 
 > **Status:** Current implementation
 >
-> **Verification basis:** `f8527f7`
+> **Verification basis:** `ff6b0c3`
 
 ## 1. Executive summary
 
@@ -10,12 +10,14 @@ The extractor is a one-shot command line tool. You give it one messy document an
 a schema. It gives you back one validated JSON object on stdout, or it names exactly why it
 could not.
 
-It has four modules and no state. `__main__.py` parses the command line, resolves the selected
-provider through the registry, and decides the exit code. `intake.py` turns a path or `-` into a
-document string. `schemas.py` holds the Pydantic models that define what can be extracted.
-`extraction.py` owns the provider registry and its three adapters — OpenAI, Anthropic, and
-OpenRouter: it builds the prompt, binds the schema through each provider's enforced path, makes
-the call, and translates everything that can happen into one of six named outcomes.
+It has six modules and no state. `invocation.py` turns one command line into a resolved
+invocation or a named invocation failure. `__main__.py` runs what was resolved and decides the
+exit code. `intake.py` turns a path or `-` into a document string. `schemas.py` holds the
+Pydantic models that define what can be extracted. `credentials.py` resolves one provider key
+from the environment or `extractor/.env`. `extraction.py` owns the provider registry and its
+three adapters — OpenAI, Anthropic, and OpenRouter: it builds the prompt, binds the schema
+through each provider's enforced path, makes the call, and translates everything that can happen
+into one of six named outcomes.
 
 There is no database and no cache. The only data that outlives a run is what the caller
 redirects from stdout. The rule a contributor must not break: an extraction attempt returns a
@@ -53,10 +55,11 @@ Outside the boundary: provider services, the filesystem the document is read fro
    providers — OpenAI and OpenRouter share one integration, Anthropic has its own unrelated
    exception tree — and both are exercised offline. See ADR-0004.
 
-2. **Outcomes are a closed union, matched exhaustively.** `Extraction` is a `type` alias over
-   six frozen dataclasses. `_report` ends its `match` with `case unreachable:
-   assert_never(unreachable)`. Enforced by `mypy --strict`: adding a seventh member fails type
-   checking at the match instead of falling through at runtime. See ADR-0002.
+2. **Every expected failure is a closed union, matched exhaustively.** `Extraction` is a `type`
+   alias over six frozen dataclasses; `IntakeFailure` and `InvocationFailure` are the same shape
+   for their own domains. Each `match` ends with `case unreachable: assert_never(unreachable)`.
+   Enforced by `mypy --strict`: adding a member fails type checking at the match instead of
+   falling through at runtime. See ADR-0002.
 
 3. **A document returned by intake has already cleared the ceiling.** `load_source_document`
    returns `Intake`, and the `str` branch is only reachable after the
@@ -65,13 +68,16 @@ Outside the boundary: provider services, the filesystem the document is read fro
 
 4. **No provider or framework type crosses into the CLI.** `__main__.py` imports only from
    `extractor.*`. The `PROVIDERS` registry in `extraction.py` is the sole place provider names
-   appear as strings, and each entry is a `Provider` carrying that provider's default model and
-   port factory; the CLI only looks up the parsed value. `ExtractionPort` remains
+   appear as strings, and each entry is a `ProviderAdapter` carrying that provider's default
+   model, its model builder, and its integration; `invocation.py` only looks up the parsed
+   value. `main` depends on the `Provider` protocol, not on the concrete record, so a test
+   satisfies it without naming a provider SDK. `ExtractionPort` remains
    `(str, type[BaseModel]) -> Extraction`.
 
 5. **Every schema field is required and nullable with no default.** Enforced structured output
-   demands it. Enforced by a test that reads the generated JSON schema
-   (`tests/test_schemas.py:19`), not by the type system. See ADR-0001.
+   demands it. Enforced by tests that read the generated JSON schema for every entry in
+   `SCHEMAS`, not by the type system, so a newly registered schema cannot escape the contract.
+   See ADR-0001.
 
 6. **The extracted object is the only thing on stdout.** Every diagnostic goes to stderr,
    including the `--debug` raw message dump. Enforced by `_report` being the sole writer of
@@ -86,15 +92,34 @@ Outside the boundary: provider services, the filesystem the document is read fro
    sending the routing guard, so an endpoint that cannot enforce the schema is never selected.
    Enforced by ADR-0001, adapter binding tests, the emitted-request test, and review.
 
+9. **Resolution decides; `main` acts.** `resolve` returns a value and never constructs a port,
+   reads a document, or writes a diagnostic. Every argument check therefore happens before
+   anything costs money or touches the filesystem, and that ordering is structural rather than
+   a sequence `main` has to preserve.
+
 ## 4. Components and dependencies
 
-Dependencies point one way: `__main__` depends on `intake`, `schemas`, and `extraction`.
-Nothing depends on `__main__`. `intake` and `schemas` depend on nothing in the module.
+Dependencies point one way: `__main__` depends on `invocation`, `intake`, `credentials`, and
+`extraction`; `invocation` depends on `extraction` and `schemas`; `extraction` depends on
+`credentials`. Nothing depends on `__main__`. `intake`, `schemas`, and `credentials` depend on
+nothing in the module.
 
-**`__main__.py`** owns argument parsing, manual provider and reasoning validation, the
-`ExitCode` enum, the outcome-to-exit-code mapping, and the top-level error net. It does not own
-how a document is read, what the schemas are, or how a provider is called. It never imports
-LangChain or a provider SDK.
+**`__main__.py`** owns the `ExitCode` enum, the three rendering functions and their exhaustive
+matches, and the top-level error net. It does not own how a command line is validated, how a
+document is read, what the schemas are, or how a provider is called. It never imports LangChain
+or a provider SDK.
+
+**`invocation.py`** owns the argument parser, the order the checks run in, and the closed
+`Resolution` union: a resolved `Invocation`, a `SchemaListing`, `HelpRequested`, or one of five
+`InvocationFailure` members. It does not own their wording — failures carry their facts and
+`__main__` renders them, the same split `intake` and `extraction` use. An `Invocation` holds the
+selected `Provider` and the built `PortSettings`, not the raw strings, so no caller can reach a
+value that was never checked. Like `intake`, it is deliberately not a seam.
+
+**`credentials.py`** owns `ENV_FILE`, the `.env` reader, and `ConfigurationError`. Its whole
+interface is `required_key(name)`: a returned key is usable, and everything else raises. It does
+not own which provider needs which key. Not a seam — one implementation, and tests point
+`ENV_FILE` at a temporary file rather than substituting it.
 
 **`intake.py`** owns reading stdin or a UTF-8 file, the 100,000-character ceiling, and the
 classification of a refusal into `UnreadableSource` or `OversizeDocument`. It does not own the
@@ -105,59 +130,67 @@ split `extraction.py` and `_report` use. It is deliberately not a seam.
 field descriptions, which are prompt surface as well as validation. It does not own schema
 selection or error reporting.
 
-**`extraction.py`** owns everything provider-shaped: the `PROVIDERS` registry and its `Provider`
-entries, frozen `PortSettings`, `_load_env_file` and the per-provider key check, the three
-adapters and their model construction, the shared `ChatPromptTemplate`, enforced
+**`extraction.py`** owns everything provider-shaped: the `PROVIDERS` registry and its
+`ProviderAdapter` entries, the two `Integration` values, frozen `PortSettings`, the three model
+builders and their reasoning translation, the shared `ChatPromptTemplate`, enforced
 structured-output binding, debug dumps, both exception-to-outcome funnels, and the six outcome
-dataclasses. It also declares `ExtractionPort` because the union lives here. It does not own exit
-codes or any output formatting other than adapter debug dumps.
+dataclasses. It declares `ExtractionPort` and the `Provider` protocol because the union lives
+here. It does not own exit codes, credentials, or any output formatting other than debug dumps.
 
-The three adapters share the prompt and the envelope classification. OpenAI and OpenRouter share
-more than that: `_openai_family_port` builds the whole port for both — the strict json-schema
-binding and the exception funnel — so those two adapters differ only in how they construct
-`ChatOpenAI`. What differs per provider is that model construction, the reasoning spelling, the
-binding arguments, and where a refusal is read from.
+Two axes vary, and they are held separately. An `Integration` is one vendor chat integration:
+how it binds a schema through its enforced path, and how its SDK reports failure. Two exist —
+`OPENAI_FAMILY` and `ANTHROPIC` — and ADR-0004 is why they never merge. A `ProviderAdapter` is
+one registered provider: its default model, how its chat model is built, and which integration
+serves it. Three exist, and the registry states plainly that OpenRouter shares OpenAI's
+integration. Everything invariant — the prompt, the debug dump, and outcome classification —
+lives once in `ProviderAdapter.build_port`.
 
-The seam between the CLI and providers is `PortFactory = Callable[[PortSettings],
-ExtractionPort]`, reached through `Provider.build_port`. `PortSettings` carries the model id,
-provider-neutral reasoning level, and optional debug stream. `main` receives a mapping of
-provider names to `Provider` records, defaulting to `PROVIDERS`; CLI tests substitute the
-mapping without importing a provider or framework type.
+The seam between the CLI and providers is the `Provider` protocol: a `default_model` and
+`build_port(settings)`. `PortSettings` carries the model id, provider-neutral reasoning level,
+and optional debug stream. `main` receives a mapping of provider names to `Provider`, defaulting
+to `PROVIDERS`; tests satisfy the protocol with a staged port and never import a provider or
+framework type. Adapter tests substitute one step deeper, supplying a `build_model` that returns
+a canned chat model.
 
 ## 5. Critical flows
 
 ### Successful extraction
 
-1. `main` catches argument-parser exits and returns `FAILURE`. It manually validates
-   `--provider` and `--reasoning`, listing valid values and returning `FAILURE` before document
-   intake or provider construction on an unknown value. `--list-schemas` then short-circuits:
-   it writes sorted names to stdout and returns `OK`.
-2. Missing `--schema` or missing input path writes an input error and returns `FAILURE`.
-3. An unrecognised schema name writes the valid names and returns `FAILURE`. No provider call
-   happens, and no document is read.
-4. `load_source_document` reads stdin or the file. Anything that is not a `str` goes to
+1. `resolve` parses the command line. A parser exit becomes `HelpRequested` (exit `OK`) or
+   `BadInvocation` (exit `FAILURE`, and nothing further is written because argparse already
+   named the offending argument). It then checks `--provider` and `--reasoning`, returning
+   `UnknownProvider` or `UnknownReasoningLevel` carrying the valid values. `--list-schemas`
+   short-circuits *after* those checks, so a bad `--provider` beside it is still reported.
+2. Missing `--schema` or missing input path returns `MissingArguments`.
+3. An unrecognised schema name returns `UnknownSchema` with the valid names. Nothing has been
+   constructed and no document has been read.
+4. `main` matches the resolution. Every `InvocationFailure` goes to `_report_invocation`, which
+   writes the diagnostic and returns `FAILURE`.
+5. `load_source_document` reads stdin or the file. Anything that is not a `str` goes to
    `_report_intake`, which writes the diagnostic and returns `FAILURE`.
-5. The selected `Provider` supplies its own default model when `--model` is absent, and its
-   factory receives one frozen `PortSettings`. Every adapter loads `extractor/.env`, raises
-   `ConfigurationError` if that file is unreadable or if *its own* key — `OPENAI_API_KEY`,
-   `ANTHROPIC_API_KEY`, or `OPENROUTER_API_KEY` — is absent, then constructs its chat model.
-   Construction happens after intake, so an oversize document costs nothing.
-6. Reasoning is translated per provider. OpenAI maps `off` to a `none` effort and keeps the
+6. The resolved `Invocation` already carries the selected provider and one frozen
+   `PortSettings`, whose model id is `--model` or the provider's own default. Its model builder
+   calls `required_key`, which loads `extractor/.env` and raises `ConfigurationError` if that
+   file is unreadable or if *its own* key — `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
+   `OPENROUTER_API_KEY` — is absent, then constructs its chat model. Construction happens after
+   intake, so an oversize document costs nothing.
+7. Reasoning is translated per provider by a function per integration, each matching over
+   `ReasoningLevel` exhaustively. OpenAI maps `off` to a `none` effort and keeps the
    other three spellings. Anthropic maps `off` to a disabled thinking configuration with no
    effort at all, and each named level to an effort with thinking left adaptive — an effort and
    an explicit thinking configuration are mutually exclusive. OpenRouter sends an effort inside
    a `reasoning` object, `none` included.
-7. `extract(document, schema)` binds the schema through the provider's enforced path — strict
+8. `extract(document, schema)` binds the schema through the provider's enforced path — strict
    `json_schema` on OpenAI and OpenRouter, `json_schema` on Anthropic, which has no `strict`
    argument because the method *is* the enforcement — invokes `prompt | structured_model`, and
    inspects the `{"raw", "parsed", "parsing_error"}` dict.
-8. If `--debug` was passed, the raw message is written to stderr before classification.
-9. Classification order, shared by all three: a refusal becomes `Refusal`; any `parsing_error`
+9. If `--debug` was passed, the raw message is written to stderr before classification.
+10. Classification order, shared by all three: a refusal becomes `Refusal`; any `parsing_error`
    becomes `ValidationFailure`; `parsed is None` becomes `EmptyExtraction`; otherwise
    `Extracted`. Where the refusal is read from is the per-provider part — a refusal error in
    the parsing-error slot on OpenAI and OpenRouter, a `stop_reason` of `refusal` on the raw
    message on Anthropic.
-10. `_report` writes `value.model_dump_json()` plus a newline to stdout and returns `OK`.
+11. `_report` writes `value.model_dump_json()` plus a newline to stdout and returns `OK`.
 
 ### Failure before an answer
 
@@ -225,7 +258,7 @@ permissions and reads whatever path they pass.
 API keys are the only secrets. There are three — `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and
 `OPENROUTER_API_KEY` — and each adapter reads only its own, so running one provider never
 requires another's key. They are read from the process environment or `extractor/.env` by
-`_load_env_file` inside the selected adapter, never at import time. A `.env` that exists but
+`credentials.required_key`, called by the selected model builder, never at import time. A `.env` that exists but
 cannot be read raises `ConfigurationError` rather than leaking an `OSError` into the top-level
 net, and an absent one is not an error at all. An exported variable wins
 over the file, so a stale `.env` cannot shadow the shell. A missing key raises
@@ -276,17 +309,34 @@ directly rather than relied on transitively, because `extraction.py` imports the
 classes of both by name.
 
 - `tests/test_schemas.py` proves every field is described and is required-and-nullable, by
-  reading the generated JSON schema. This is the only check on invariant 5.
+  reading the generated JSON schema. It runs over every entry in `SCHEMAS`, plus a guard that
+  the registry is non-empty so the parametrised checks cannot pass vacuously. This is the only
+  check on invariant 5.
 - `tests/test_intake.py` covers stdin, UTF-8 files, missing and unreadable paths, undecodable
   bytes, and both sides of the ceiling boundary.
-- `tests/test_extraction.py` covers all three adapters through the substituted chat-model seam:
-  classification, each provider's refusal reporting, the debug dump on all three, every
-  reasoning translation, each model configuration, the per-provider key check, the binding
-  arguments, the aggregator's emitted request against a loopback stub, `.env` handling, and both
-  exception funnels.
+- `tests/test_credentials.py` covers credential resolution through `required_key` alone: the
+  file defining a key the shell lacks, an exported key winning, comments and blank lines, an
+  absent file, an absent key, an empty value, and unreadable or non-UTF-8 files.
+- `tests/test_invocation.py` covers what `resolve` decides, as values: the resolved invocation's
+  schema, source, model default and override, every reasoning level, the debug stream, and each
+  of the named failures with the valid values it carries. A tripwire provider proves resolution
+  never constructs a port.
+- `tests/test_extraction.py` covers all three adapters at two seams. Outcome tests build a
+  `ProviderAdapter` whose `build_model` returns a canned chat model — classification, each
+  provider's refusal reporting, the debug dump, the binding arguments, and both exception
+  funnels. OpenRouter has no outcome tests of its own: at this seam it *is* the OpenAI family
+  integration, which one registry assertion pins directly rather than re-running those tests
+  against an identically built model. Configuration tests substitute the SDK class in the module namespace, because the
+  arguments handed to it are visible nowhere else: every reasoning translation, each model
+  configuration, the per-provider key check, and the aggregator's emitted request against a
+  loopback stub.
 - `tests/test_cli.py` covers each outcome's exit code and stderr line through a staged port,
   per-provider default models and the `--model` override, the input and configuration paths, and
   pins the exit numbers directly.
+- `tests/staging.py` holds `StagedProvider`, which satisfies the `Provider` protocol from a
+  default model and a port factory, and the `PortFactory` alias itself — production reaches a
+  port through `Provider.build_port`, so nothing in `src/` names it. Shared by the CLI, live,
+  and invocation tests.
 - `tests/test_live.py` holds the only tests that let a real provider enforce the schema: one per
   provider, because one test cannot prove three different enforcement mechanisms. They are
   marked `live` and deselected by default (`addopts = "-m 'not live'"`), each skips loudly when
@@ -326,14 +376,16 @@ only mechanism.
 
 | File | What it defines |
 | --- | --- |
-| `src/extractor/__main__.py` | Entry point, `ExitCode`, argument parsing, `_report`, `_report_intake`, the exhaustive matches |
-| `src/extractor/extraction.py` | The `Extraction` union, `ExtractionPort`, `PortFactory`, `Provider`, `PROVIDERS`, the three `build_*_port` adapters, all provider vocabulary |
+| `src/extractor/__main__.py` | Entry point, `ExitCode`, `_report`, `_report_intake`, `_report_invocation`, the exhaustive matches |
+| `src/extractor/invocation.py` | `resolve`, the argument parser, `Invocation`, `SchemaListing`, the `InvocationFailure` and `Resolution` unions |
+| `src/extractor/credentials.py` | `required_key`, `ENV_FILE`, `ConfigurationError` |
+| `src/extractor/extraction.py` | The `Extraction` union, `ExtractionPort`, the `Provider` protocol, `Integration`, `ProviderAdapter`, `PROVIDERS`, all provider vocabulary |
 | `src/extractor/intake.py` | `load_source_document`, the `Intake` and `IntakeFailure` unions, `MAX_DOCUMENT_CHARACTERS` |
 | `src/extractor/schemas.py` | `TermsOfService`, the `SCHEMAS` registry |
 | `pyproject.toml` | Dependencies, dev group, ruff, mypy strict plus the `pydantic.mypy` plugin, pytest markers and default deselection |
 | `AGENTS.md` | Verification commands and module-level prohibitions |
 | `CODING_STANDARDS.md` | The rules every change must hold, and the rejected alternatives |
-| `docs/agents/domain.md` | Vocabulary: outcome, port, absent field, intake |
+| `docs/agents/domain.md` | Vocabulary: outcome, port, absent field, intake, invocation, integration, provider adapter |
 | `docs/adr/0001-provider-adapters-must-enforce-the-schema.md` | Why every provider must enforce the schema |
 | `docs/adr/0002-extraction-outcomes-are-a-closed-union.md` | Why outcomes are a union behind a consumer-declared port |
 | `docs/adr/0003-the-live-test-asserts-absent-fields-not-model-wording.md` | What the paid test must assert |

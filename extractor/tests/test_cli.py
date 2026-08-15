@@ -17,17 +17,15 @@ from extractor.extraction import (
     Extracted,
     Extraction,
     ExtractionPort,
-    PortFactory,
     PortSettings,
-    Provider,
     ProviderFailure,
     ProviderRejectedRequest,
     ReasoningLevel,
     Refusal,
     ValidationFailure,
-    build_openai_port,
 )
 from extractor.schemas import TermsOfService
+from tests.staging import PortFactory, StagedProvider
 
 
 class CliResult(NamedTuple):
@@ -95,7 +93,7 @@ def run_cli(
     exit_code = main(
         argv,
         stdin=StringIO(source),
-        providers={provider: Provider(PROVIDERS[provider].default_model, port_factory)},
+        providers={provider: StagedProvider(PROVIDERS[provider].default_model, port_factory)},
     )
     captured = capsys.readouterr()
     return CliResult(exit_code, captured.out, captured.err)
@@ -326,16 +324,16 @@ def test_an_unreadable_input_path_is_reported_as_an_input_error(
 
 
 def test_a_missing_api_key_is_a_named_configuration_error(
-    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setattr("extractor.extraction._load_env_file", lambda _: None)
+    monkeypatch.setattr("extractor.credentials.ENV_FILE", tmp_path / "absent.env")
 
     result = run_cli(
         capsys,
         ["--schema", "tos", "-"],
         source="source",
-        port_factory=build_openai_port,
+        port_factory=PROVIDERS[DEFAULT_PROVIDER].build_port,
     )
 
     assert result.exit_code == ExitCode.FAILURE

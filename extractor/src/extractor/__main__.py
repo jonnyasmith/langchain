@@ -1,22 +1,17 @@
-import argparse
 import sys
 from collections.abc import Mapping, Sequence
 from enum import IntEnum
 from typing import TextIO, assert_never
 
+from extractor.credentials import ConfigurationError
 from extractor.extraction import (
-    DEFAULT_PROVIDER,
     PROVIDERS,
-    REASONING_LEVELS,
-    ConfigurationError,
     EmptyExtraction,
     Extracted,
     Extraction,
-    PortSettings,
     Provider,
     ProviderFailure,
     ProviderRejectedRequest,
-    ReasoningLevel,
     Refusal,
     ValidationFailure,
 )
@@ -26,7 +21,18 @@ from extractor.intake import (
     UnreadableSource,
     load_source_document,
 )
-from extractor.schemas import SCHEMAS
+from extractor.invocation import (
+    BadInvocation,
+    HelpRequested,
+    Invocation,
+    InvocationFailure,
+    MissingArguments,
+    SchemaListing,
+    UnknownProvider,
+    UnknownReasoningLevel,
+    UnknownSchema,
+    resolve,
+)
 
 
 class ExitCode(IntEnum):
@@ -44,25 +50,6 @@ class ExitCode(IntEnum):
     REFUSAL = 4
     PROVIDER_FAILURE = 5
     PROVIDER_REJECTED_REQUEST = 6
-
-
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Extract typed data from one source document.")
-    parser.add_argument("input", nargs="?", help="source file path, or - to read stdin")
-    parser.add_argument("--schema", help="named extraction schema")
-    parser.add_argument("--model", help="provider model id; defaults to the provider's own")
-    parser.add_argument("--provider", default=DEFAULT_PROVIDER, help="extraction provider")
-    valid_reasoning = ", ".join(REASONING_LEVELS)
-    parser.add_argument(
-        "--reasoning",
-        default=ReasoningLevel.MEDIUM.value,
-        help=f"reasoning effort: {valid_reasoning}",
-    )
-    parser.add_argument("--list-schemas", action="store_true", help="list named schemas")
-    parser.add_argument(
-        "--debug", action="store_true", help="write the raw model message to stderr"
-    )
-    return parser
 
 
 def _report(outcome: Extraction) -> ExitCode:
@@ -114,52 +101,43 @@ def _report_intake(failure: IntakeFailure) -> ExitCode:
     return ExitCode.FAILURE
 
 
-def main(
-    argv: Sequence[str] | None = None,
-    *,
-    stdin: TextIO = sys.stdin,
-    providers: Mapping[str, Provider] = PROVIDERS,
-) -> ExitCode:
-    try:
-        args = _parser().parse_args(argv)
-    except SystemExit as request:
-        if request.code == 0:
-            return ExitCode.OK
-        return ExitCode.FAILURE
-    provider = providers.get(args.provider)
-    if provider is None:
-        valid_names = ", ".join(sorted(providers))
-        sys.stderr.write(f"Unknown provider {args.provider!r}. Valid providers: {valid_names}.\n")
-        return ExitCode.FAILURE
-    reasoning = REASONING_LEVELS.get(args.reasoning)
-    if reasoning is None:
-        valid_levels = ", ".join(REASONING_LEVELS)
-        sys.stderr.write(
-            f"Unknown reasoning level {args.reasoning!r}. Valid levels: {valid_levels}.\n"
-        )
-        return ExitCode.FAILURE
-    if args.list_schemas:
-        sys.stdout.write("\n".join(sorted(SCHEMAS)) + "\n")
-        return ExitCode.OK
-    if args.schema is None or args.input is None:
-        sys.stderr.write("Input error: --schema and an input path are required.\n")
-        return ExitCode.FAILURE
-    schema = SCHEMAS.get(args.schema)
-    if schema is None:
-        valid_names = ", ".join(sorted(SCHEMAS))
-        sys.stderr.write(f"Unknown schema {args.schema!r}. Valid schemas: {valid_names}.\n")
-        return ExitCode.FAILURE
-    document = load_source_document(args.input, stdin)
+def _report_invocation(failure: InvocationFailure) -> ExitCode:
+    """Write an invocation failure's diagnostic and return the exit code it earns.
+
+    All members share `FAILURE`, per the `ExitCode` docstring. `BadInvocation` writes nothing:
+    the argument parser has already named the offending argument on stderr, and repeating it
+    would print the same fault twice.
+    """
+    match failure:
+        case BadInvocation():
+            pass
+        case MissingArguments():
+            sys.stderr.write("Input error: --schema and an input path are required.\n")
+        case UnknownProvider(name=name, valid=valid):
+            sys.stderr.write(f"Unknown provider {name!r}. Valid providers: {', '.join(valid)}.\n")
+        case UnknownReasoningLevel(name=name, valid=valid):
+            sys.stderr.write(
+                f"Unknown reasoning level {name!r}. Valid levels: {', '.join(valid)}.\n"
+            )
+        case UnknownSchema(name=name, valid=valid):
+            sys.stderr.write(f"Unknown schema {name!r}. Valid schemas: {', '.join(valid)}.\n")
+        case unreachable:
+            assert_never(unreachable)
+    return ExitCode.FAILURE
+
+
+def _extract(invocation: Invocation, stdin: TextIO) -> ExitCode:
+    """Run one resolved invocation: read the document, call the provider, report the outcome.
+
+    Everything here is already validated, so this reads as the happy path it is. The port is
+    constructed after intake, so an oversize document costs nothing.
+    """
+    document = load_source_document(invocation.source, stdin)
     if not isinstance(document, str):
         return _report_intake(document)
-    settings = PortSettings(
-        model_id=args.model or provider.default_model,
-        reasoning=reasoning,
-        debug=sys.stderr if args.debug else None,
-    )
     try:
-        extract = provider.build_port(settings)
-        outcome = extract(document, schema)
+        extract = invocation.provider.build_port(invocation.settings)
+        outcome = extract(document, invocation.schema)
     except ConfigurationError as error:
         sys.stderr.write(f"Configuration error: {error}\n")
         return ExitCode.FAILURE
@@ -167,6 +145,24 @@ def main(
         sys.stderr.write(f"Unexpected error: {error}\n")
         return ExitCode.FAILURE
     return _report(outcome)
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    stdin: TextIO = sys.stdin,
+    providers: Mapping[str, Provider] = PROVIDERS,
+) -> ExitCode:
+    match resolve(argv, providers):
+        case HelpRequested():
+            return ExitCode.OK
+        case SchemaListing(names=names):
+            sys.stdout.write("\n".join(names) + "\n")
+            return ExitCode.OK
+        case Invocation() as invocation:
+            return _extract(invocation, stdin)
+        case failure:
+            return _report_invocation(failure)
 
 
 if __name__ == "__main__":
