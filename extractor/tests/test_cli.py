@@ -326,10 +326,10 @@ def test_an_unreadable_input_path_is_reported_as_an_input_error(
 
 
 def test_a_missing_api_key_is_a_named_configuration_error(
-    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setattr("extractor.extraction._load_env_file", lambda _: None)
+    monkeypatch.setattr("extractor.credentials.ENV_FILE", tmp_path / "absent.env")
 
     result = run_cli(
         capsys,

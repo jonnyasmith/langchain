@@ -4,11 +4,11 @@ from collections.abc import Mapping, Sequence
 from enum import IntEnum
 from typing import TextIO, assert_never
 
+from extractor.credentials import ConfigurationError
 from extractor.extraction import (
     DEFAULT_PROVIDER,
     PROVIDERS,
     REASONING_LEVELS,
-    ConfigurationError,
     EmptyExtraction,
     Extracted,
     Extraction,

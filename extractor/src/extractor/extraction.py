@@ -1,8 +1,6 @@
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
 from typing import Any, Literal, Protocol, TextIO, TypedDict, cast
 
 from anthropic import APIError as AnthropicAPIError
@@ -17,6 +15,8 @@ from langchain_openai import ChatOpenAI
 from langchain_openai.chat_models.base import OpenAIRefusalError
 from openai import APIError, BadRequestError, NotFoundError, UnprocessableEntityError
 from pydantic import BaseModel, SecretStr
+
+from extractor.credentials import required_key
 
 
 class ReasoningLevel(StrEnum):
@@ -38,10 +38,6 @@ class PortSettings:
     model_id: str
     reasoning: ReasoningLevel
     debug: TextIO | None
-
-
-class ConfigurationError(Exception):
-    """The extractor cannot construct its provider adapter."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,8 +116,6 @@ type _StructuredChain = Runnable[dict[str, str], Any]
 
 type _RefusalReader = Callable[[_RawStructuredOutput], str | None]
 
-_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
-
 _REQUEST_TIMEOUT_SECONDS = 60
 _MAX_RETRIES = 2
 
@@ -141,42 +135,6 @@ _PROMPT = ChatPromptTemplate.from_messages(
         ("human", "{document}"),
     ]
 )
-
-
-def _load_env_file(path: Path) -> None:
-    """Define any `KEY=value` the file declares that the environment does not already set.
-
-    Ten lines rather than a dependency, per the coding standards. An exported variable always
-    wins, so a stale file cannot shadow the shell. No interpolation, `export` prefixes, or
-    multi-line values: the extractor reads one key per provider.
-
-    A file that exists but cannot be read is a misconfiguration, not an unexpected state, so
-    it raises `ConfigurationError` rather than leaking an `OSError` into the top-level net.
-    """
-    if not path.is_file():
-        return
-    try:
-        contents = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as error:
-        raise ConfigurationError(f"cannot read {path}: {error}") from error
-    for line in contents.splitlines():
-        entry = line.strip()
-        if not entry or entry.startswith("#") or "=" not in entry:
-            continue
-        key, _, value = entry.partition("=")
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        os.environ.setdefault(key.strip(), value)
-
-
-def _required_key(name: str) -> str:
-    """Read one provider's key, or fail before anything is constructed or sent."""
-    _load_env_file(_ENV_FILE)
-    key = os.getenv(name)
-    if not key:
-        raise ConfigurationError(f"missing {name}; set it in extractor/.env")
-    return key
 
 
 def _classify(
@@ -328,7 +286,7 @@ def _openai_family_port(model: ChatOpenAI, debug: TextIO | None) -> ExtractionPo
 
 def build_openai_port(settings: PortSettings) -> ExtractionPort:
     """Build the OpenAI-backed extraction port, or fail if it cannot be configured."""
-    _required_key("OPENAI_API_KEY")
+    required_key("OPENAI_API_KEY")
     return _openai_family_port(
         ChatOpenAI(
             model=settings.model_id,
@@ -348,7 +306,7 @@ def build_anthropic_port(settings: PortSettings) -> ExtractionPort:
     and all three named reasoning levels turn it on, so pinning it would break every default
     run instead of buying repeatability.
     """
-    _required_key("ANTHROPIC_API_KEY")
+    required_key("ANTHROPIC_API_KEY")
     thinking, effort = _ANTHROPIC_REASONING[settings.reasoning]
     model = ChatAnthropic(
         model=settings.model_id,
@@ -388,7 +346,7 @@ def build_openrouter_port(settings: PortSettings) -> ExtractionPort:
     constraint, and the default model's endpoint does not advertise temperature, so sending it
     would leave the aggregator with no endpoint able to enforce the schema.
     """
-    key = _required_key("OPENROUTER_API_KEY")
+    key = required_key("OPENROUTER_API_KEY")
     return _openai_family_port(
         ChatOpenAI(
             model=settings.model_id,

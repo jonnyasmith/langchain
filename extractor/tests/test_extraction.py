@@ -13,8 +13,6 @@ carries `httpx` — so provider errors are built with the flavour their own SDK 
 """
 
 import json
-import os
-import re
 import threading
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -42,8 +40,8 @@ from openai import (
 from pydantic import SecretStr
 
 from extractor import extraction
+from extractor.credentials import ConfigurationError
 from extractor.extraction import (
-    ConfigurationError,
     EmptyExtraction,
     Extracted,
     Extraction,
@@ -54,7 +52,6 @@ from extractor.extraction import (
     ReasoningLevel,
     Refusal,
     ValidationFailure,
-    _load_env_file,
     build_anthropic_port,
     build_openai_port,
     build_openrouter_port,
@@ -495,12 +492,13 @@ def test_the_openrouter_model_is_configured_for_the_aggregator_and_nothing_else(
 )
 def test_each_adapter_checks_only_its_own_key_before_building_the_model(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     build: PortFactory,
     key: str,
 ) -> None:
     """Every other provider's key is present and does not help, and the message names both the
     missing key and where to put it. Nothing is constructed, so a misconfigured run is free."""
-    monkeypatch.setattr("extractor.extraction._load_env_file", lambda _: None)
+    monkeypatch.setattr("extractor.credentials.ENV_FILE", tmp_path / "absent.env")
     for other in ALL_KEYS:
         monkeypatch.setenv(other, "test-key")
     monkeypatch.delenv(key, raising=False)
@@ -522,21 +520,29 @@ def test_each_adapter_checks_only_its_own_key_before_building_the_model(
         (build_openrouter_port, "OPENROUTER_API_KEY"),
     ],
 )
-def test_each_adapter_reads_its_key_from_the_app_local_dotenv(
+def test_each_adapter_takes_its_key_from_the_credentials_file_not_the_shell(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     build: PortFactory,
     key: str,
 ) -> None:
-    """`extractor/.env`, so no key has to be exported into every shell."""
-    monkeypatch.setenv(key, "test-key")
+    """No key is exported, so the adapter can only build if it resolved one from the file.
+
+    `test_credentials.py` pins where that file lives; this pins that every adapter goes
+    through it rather than reading the environment directly.
+    """
+    for name in ALL_KEYS:
+        monkeypatch.delenv(name, raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{key}=file-key\n", encoding="utf-8")
+    monkeypatch.setattr("extractor.credentials.ENV_FILE", env_file)
+    built: list[str] = []
     for target in ("ChatOpenAI", "ChatAnthropic"):
-        monkeypatch.setattr(f"extractor.extraction.{target}", lambda **_: None)
-    loaded: list[Path] = []
-    monkeypatch.setattr("extractor.extraction._load_env_file", loaded.append)
+        monkeypatch.setattr(f"extractor.extraction.{target}", lambda **_: built.append("built"))
 
     build(PortSettings("any-model", ReasoningLevel.MEDIUM, None))
 
-    assert loaded == [Path(__file__).resolve().parents[1] / ".env"]
+    assert built == ["built"]
 
 
 def test_the_openai_binding_asks_the_provider_to_enforce_the_schema(
@@ -786,67 +792,3 @@ def test_an_unknown_model_id_is_a_provider_rejected_request_on_every_provider(
     outcome = extract(monkeypatch, error)
 
     assert outcome == ProviderRejectedRequest(detail=str(error))
-
-
-def test_the_env_file_defines_a_key_the_environment_lacks(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    env_file = tmp_path / ".env"
-    env_file.write_text('OPENAI_API_KEY="file-key"\n', encoding="utf-8")
-
-    _load_env_file(env_file)
-
-    assert os.environ["OPENAI_API_KEY"] == "file-key"
-
-
-def test_an_exported_key_beats_the_env_file(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The shell is the operator's override; a stale file must not shadow it."""
-    monkeypatch.setenv("OPENAI_API_KEY", "exported-key")
-    env_file = tmp_path / ".env"
-    env_file.write_text("OPENAI_API_KEY=file-key\n", encoding="utf-8")
-
-    _load_env_file(env_file)
-
-    assert os.environ["OPENAI_API_KEY"] == "exported-key"
-
-
-def test_the_env_file_ignores_blank_lines_and_comments(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "\n# OPENAI_API_KEY=commented-out\n\nOPENAI_API_KEY=file-key\n", encoding="utf-8"
-    )
-
-    _load_env_file(env_file)
-
-    assert os.environ["OPENAI_API_KEY"] == "file-key"
-
-
-def test_a_missing_env_file_is_not_an_error(tmp_path: Path) -> None:
-    """Returning rather than raising is the assertion: a first run has no `.env` and the key
-    may be exported instead, so an absent file must not fail the extractor."""
-    _load_env_file(tmp_path / ".env")
-
-
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 file regardless")
-def test_an_unreadable_env_file_is_a_configuration_error(tmp_path: Path) -> None:
-    """A present-but-unreadable file is a misconfiguration, not an `Unexpected error`."""
-    env_file = tmp_path / ".env"
-    env_file.write_text("OPENAI_API_KEY=file-key\n", encoding="utf-8")
-    env_file.chmod(0o000)
-
-    with pytest.raises(ConfigurationError, match=re.escape(str(env_file))):
-        _load_env_file(env_file)
-
-
-def test_a_non_utf8_env_file_is_a_configuration_error(tmp_path: Path) -> None:
-    env_file = tmp_path / ".env"
-    env_file.write_bytes(b"OPENAI_API_KEY=caf\xe9\n")
-
-    with pytest.raises(ConfigurationError, match=re.escape(str(env_file))):
-        _load_env_file(env_file)

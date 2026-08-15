@@ -22,10 +22,10 @@ import pytest
 from pydantic import BaseModel
 
 from extractor.__main__ import ExitCode, main
+from extractor.credentials import ConfigurationError
 from extractor.extraction import (
     DEFAULT_PROVIDER,
     PROVIDERS,
-    ConfigurationError,
     Extraction,
     ExtractionPort,
     PortSettings,
