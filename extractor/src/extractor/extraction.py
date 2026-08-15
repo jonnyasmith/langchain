@@ -2,9 +2,10 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, TextIO, cast
+from typing import Protocol, TextIO, TypedDict, cast
 
 from dotenv import load_dotenv
+from langchain_core.messages import BaseMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from langchain_openai.chat_models.base import OpenAIRefusalError
@@ -66,6 +67,18 @@ type Extraction = (
 )
 
 
+class _RawStructuredOutput(TypedDict):
+    """The envelope `with_structured_output(include_raw=True)` returns.
+
+    `langchain_openai` types that call's result as a plain mapping, so this is the shape
+    the one boundary `cast` asserts. Every key the adapter reads is checked against it.
+    """
+
+    raw: BaseMessage
+    parsed: BaseModel | None
+    parsing_error: BaseException | None
+
+
 class ExtractionPort(Protocol):
     """One extraction attempt: document plus schema in, one named outcome out."""
 
@@ -107,7 +120,7 @@ def build_openai_port(model_id: str, debug: TextIO | None) -> ExtractionPort:
         )
         chain = prompt | structured_model
         try:
-            result = cast(dict[str, Any], chain.invoke({"document": document}))
+            result = cast(_RawStructuredOutput, chain.invoke({"document": document}))
         except OpenAIRefusalError as error:
             return Refusal(detail=str(error))
         except (BadRequestError, NotFoundError, UnprocessableEntityError) as error:
