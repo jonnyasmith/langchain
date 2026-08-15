@@ -184,17 +184,6 @@ def extract_through_openai(
     return extract_through(canned_provider(response), debug=debug)
 
 
-def extract_through_openrouter(
-    response: AIMessage | BaseException, *, debug: StringIO | None = None
-) -> Extraction:
-    """The aggregator shares OpenAI's integration, so at this seam it shares its outcomes too.
-
-    That sharing is the claim these tests pin: what differs on OpenRouter is the model the
-    registry builds, which the configuration tests cover separately.
-    """
-    return extract_through(canned_provider(response), debug=debug)
-
-
 def extract_through_anthropic(
     response: AIMessage | BaseException, *, debug: StringIO | None = None
 ) -> Extraction:
@@ -271,15 +260,16 @@ def test_a_refusal_raised_by_the_provider_is_a_refusal() -> None:
     assert "declined" in outcome.detail
 
 
-def test_a_refusal_passed_through_by_the_aggregator_is_a_refusal() -> None:
+def test_a_refusal_carried_on_the_message_is_read_by_the_openai_family_refusal_reader() -> None:
     """Reachable through OpenRouter, not guaranteed: the refusal is read off a message field
-    any OpenAI-format response may carry, so it depends on the upstream provider sending it."""
+    any OpenAI-format response may carry, so it depends on the upstream provider sending it.
+    ADR-0004. The aggregator inherits this reader whole, which the registry test above pins."""
     refused = AIMessage(
         content="",
         additional_kwargs={"refusal": "The upstream provider declined this extraction."},
     )
 
-    outcome = extract_through_openrouter(refused)
+    outcome = extract_through_openai(refused)
 
     assert isinstance(outcome, Refusal)
     assert "declined" in outcome.detail
@@ -310,10 +300,15 @@ def test_an_anthropic_object_the_schema_rejects_is_a_validation_failure() -> Non
     assert "effective_date" in outcome.detail
 
 
-def test_an_openrouter_parsed_object_is_an_extracted_outcome() -> None:
-    outcome = extract_through_openrouter(parsed_message(VALID_FACTS))
-
-    assert outcome == Extracted(TermsOfService.model_validate(VALID_FACTS))
+def test_the_aggregator_is_registered_with_the_openai_family_integration() -> None:
+    """This is the whole of what OpenRouter shares: one binding, one exception funnel, one
+    refusal reader. Asserting it here is what lets every OpenAI outcome test count for the
+    aggregator too — re-running those tests against an identically built canned model would
+    assert nothing, because at this seam the two are the same code.
+    """
+    assert PROVIDERS["openrouter"].integration is OPENAI_FAMILY
+    assert PROVIDERS["openai"].integration is OPENAI_FAMILY
+    assert PROVIDERS["anthropic"].integration is ANTHROPIC
 
 
 @pytest.mark.parametrize(
@@ -321,10 +316,9 @@ def test_an_openrouter_parsed_object_is_an_extracted_outcome() -> None:
     [
         (extract_through_openai, parsed_message(VALID_FACTS)),
         (extract_through_anthropic, anthropic_message(VALID_FACTS)),
-        (extract_through_openrouter, parsed_message(VALID_FACTS)),
     ],
 )
-def test_the_debug_stream_receives_the_raw_provider_message_on_every_provider(
+def test_the_debug_stream_receives_the_raw_provider_message_on_every_integration(
     monkeypatch: pytest.MonkeyPatch,
     extract: Callable[..., Extraction],
     response: AIMessage,
@@ -343,7 +337,6 @@ def test_the_debug_stream_receives_the_raw_provider_message_on_every_provider(
     [
         (extract_through_openai, parsed_message(VALID_FACTS)),
         (extract_through_anthropic, anthropic_message(VALID_FACTS)),
-        (extract_through_openrouter, parsed_message(VALID_FACTS)),
     ],
 )
 def test_without_a_debug_stream_no_adapter_writes_to_stdout_or_stderr(
@@ -561,25 +554,6 @@ def test_the_openai_binding_asks_the_provider_to_enforce_the_schema(
     ]
 
 
-def test_the_openrouter_binding_asks_the_aggregator_to_enforce_the_schema(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The registry gives the aggregator OpenAI's integration, so the strict binding it sends
-    is that integration's. This pins that the shared entry is what the registry actually holds."""
-    bindings = record_bindings(monkeypatch, ChatOpenAI)
-
-    extract_through_openrouter(parsed_message(VALID_FACTS))
-
-    assert bindings == [
-        {
-            "schema": TermsOfService,
-            "method": "json_schema",
-            "strict": True,
-            "include_raw": True,
-        }
-    ]
-
-
 def test_the_anthropic_binding_enforces_through_json_schema_never_function_calling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -751,10 +725,11 @@ def test_the_anthropic_family_base_class_becomes_a_provider_failure() -> None:
 
 def test_exhausted_aggregator_credit_becomes_a_provider_failure() -> None:
     """It has no named subclass, so it falls through to the base class — which is right, since
-    re-running after topping up succeeds."""
+    re-running after topping up succeeds. Raised by the aggregator, funnelled by the OpenAI
+    family integration it is registered with."""
     credit_exhausted = openai_error(APIStatusError, "insufficient credits", 402)
 
-    outcome = extract_through_openrouter(credit_exhausted)
+    outcome = extract_through_openai(credit_exhausted)
 
     assert outcome == ProviderFailure(detail=str(credit_exhausted))
 
@@ -763,14 +738,13 @@ def test_exhausted_aggregator_credit_becomes_a_provider_failure() -> None:
     ("extract", "error"),
     [
         (extract_through_openai, openai_error(NotFoundError, "model does not exist", 404)),
-        (extract_through_openrouter, openai_error(NotFoundError, "model does not exist", 404)),
         (
             extract_through_anthropic,
             anthropic_error(anthropic.NotFoundError, "model does not exist", 404),
         ),
     ],
 )
-def test_an_unknown_model_id_is_a_provider_rejected_request_on_every_provider(
+def test_an_unknown_model_id_is_a_provider_rejected_request_on_every_integration(
     monkeypatch: pytest.MonkeyPatch,
     extract: Callable[..., Extraction],
     error: BaseException,

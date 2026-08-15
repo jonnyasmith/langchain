@@ -8,7 +8,7 @@ from anthropic import BadRequestError as AnthropicBadRequestError
 from anthropic import NotFoundError as AnthropicNotFoundError
 from anthropic import UnprocessableEntityError as AnthropicUnprocessableEntityError
 from langchain_anthropic import ChatAnthropic
-from langchain_core.language_models import BaseChatModel
+from langchain_core.language_models import BaseChatModel, LanguageModelInput
 from langchain_core.messages import BaseMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import Runnable
@@ -109,14 +109,12 @@ class ExtractionPort(Protocol):
     def __call__(self, document: str, schema: type[BaseModel]) -> Extraction: ...
 
 
-type PortFactory = Callable[[PortSettings], ExtractionPort]
-
-
 class Provider(Protocol):
     """The seam `main` depends on: a default model, and a port built from settings.
 
-    Declared by the consumer, so the CLI names what it needs rather than importing the registry's
-    concrete record. `ProviderAdapter` satisfies it in production; a test supplies its own.
+    Narrower than the registry's record on purpose — it names the two members the CLI uses and
+    nothing else, so a test satisfies it without a model builder or an integration.
+    `ProviderAdapter` satisfies it structurally; neither has to know about the other.
     """
 
     @property
@@ -129,9 +127,9 @@ class Provider(Protocol):
 # mapping, and reshaping it is what the funnel's `cast` does. This is the boundary rule 6 allows.
 type _StructuredChain = Runnable[dict[str, str], Any]
 
-# The bound model before the prompt is piped into it. Its input type is the integration's own
-# message union, which nothing here needs to name.
-type _StructuredModel = Runnable[Any, Any]
+# The bound model before the prompt is piped into it. `Any` stays in the output position only,
+# as it does for `_StructuredChain`: the input is the integration's own named message union.
+type _StructuredModel = Runnable[LanguageModelInput, Any]
 
 type _RefusalReader = Callable[[_RawStructuredOutput], str | None]
 
@@ -275,15 +273,15 @@ def _openai_family_effort(level: ReasoningLevel) -> _Effort:
             assert_never(unreachable)
 
 
-@dataclass(frozen=True, slots=True)
-class _AnthropicReasoning:
-    """Anthropic's two reasoning controls, which are mutually exclusive.
+class _AnthropicReasoning(TypedDict):
+    """Anthropic's two mutually exclusive reasoning controls, spelled as constructor arguments.
 
-    Named fields rather than a pair, so the adapter cannot silently transpose them.
+    Keyed by parameter name so the builder unpacks it rather than reading fields back out;
+    there is no order to transpose and no half of it the builder can forget to pass on.
     """
 
     thinking: dict[str, str] | None
-    effort: Literal["low", "medium", "high"] | None
+    reasoning_effort: Literal["low", "medium", "high"] | None
 
 
 def _anthropic_reasoning(level: ReasoningLevel) -> _AnthropicReasoning:
@@ -294,13 +292,13 @@ def _anthropic_reasoning(level: ReasoningLevel) -> _AnthropicReasoning:
     """
     match level:
         case ReasoningLevel.OFF:
-            return _AnthropicReasoning(thinking={"type": "disabled"}, effort=None)
+            return _AnthropicReasoning(thinking={"type": "disabled"}, reasoning_effort=None)
         case ReasoningLevel.LOW:
-            return _AnthropicReasoning(thinking=None, effort="low")
+            return _AnthropicReasoning(thinking=None, reasoning_effort="low")
         case ReasoningLevel.MEDIUM:
-            return _AnthropicReasoning(thinking=None, effort="medium")
+            return _AnthropicReasoning(thinking=None, reasoning_effort="medium")
         case ReasoningLevel.HIGH:
-            return _AnthropicReasoning(thinking=None, effort="high")
+            return _AnthropicReasoning(thinking=None, reasoning_effort="high")
         case unreachable:
             assert_never(unreachable)
 
@@ -358,7 +356,10 @@ ANTHROPIC = Integration(bind=_bind_anthropic, call=_through_anthropic)
 
 
 def _build_openai_model(settings: PortSettings) -> BaseChatModel:
-    """Temperature is pinned here and nowhere else; the other two providers cannot accept it."""
+    """Build the OpenAI chat model, or fail before anything is sent.
+
+    Temperature is pinned here and nowhere else; the other two providers cannot accept it.
+    """
     required_key("OPENAI_API_KEY")
     return ChatOpenAI(
         model=settings.model_id,
@@ -370,23 +371,26 @@ def _build_openai_model(settings: PortSettings) -> BaseChatModel:
 
 
 def _build_anthropic_model(settings: PortSettings) -> BaseChatModel:
-    """No temperature is set. Anthropic rejects a modified temperature whenever thinking is on,
-    and all three named reasoning levels turn it on, so pinning it would break every default run
-    instead of buying repeatability."""
+    """Build the Anthropic chat model, or fail before anything is sent.
+
+    No temperature is set. Anthropic rejects a modified temperature whenever thinking is on, and
+    all three named reasoning levels turn it on, so pinning it would break every default run
+    instead of buying repeatability.
+    """
     required_key("ANTHROPIC_API_KEY")
-    reasoning = _anthropic_reasoning(settings.reasoning)
     return ChatAnthropic(
         model=settings.model_id,
-        thinking=reasoning.thinking,
-        reasoning_effort=reasoning.effort,
+        **_anthropic_reasoning(settings.reasoning),
         timeout=_REQUEST_TIMEOUT_SECONDS,
         max_retries=_MAX_RETRIES,
     )
 
 
 def _build_openrouter_model(settings: PortSettings) -> BaseChatModel:
-    """The aggregator is reached through the OpenAI-compatible chat model pointed at its base
-    URL, so it adds no dependency and inherits that integration's exception classes.
+    """Build the aggregator's chat model, or fail before anything is sent.
+
+    The aggregator is reached through the OpenAI-compatible chat model pointed at its base URL,
+    so it adds no dependency and inherits that integration's exception classes.
 
     `extra_body` is load-bearing: the SDK hoists it to the top level of the request, which is
     where the aggregator reads the routing guard and the reasoning setting. The flattened

@@ -13,7 +13,6 @@ import argparse
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TextIO
 
 from pydantic import BaseModel
 
@@ -161,13 +160,9 @@ def resolve(
         settings=PortSettings(
             model_id=arguments.model or provider.default_model,
             reasoning=reasoning,
-            debug=_debug_stream(arguments.debug),
+            # Read now rather than captured at import, so a replaced stream is honoured.
+            debug=sys.stderr if arguments.debug else None,
         ),
         schema=schema,
         source=arguments.input,
     )
-
-
-def _debug_stream(requested: bool) -> TextIO | None:
-    """`sys.stderr` is read now rather than captured at import, so a test can replace it."""
-    return sys.stderr if requested else None

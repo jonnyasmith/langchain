@@ -17,7 +17,6 @@ from extractor.extraction import (
     Extracted,
     Extraction,
     ExtractionPort,
-    PortFactory,
     PortSettings,
     ProviderFailure,
     ProviderRejectedRequest,
@@ -26,7 +25,7 @@ from extractor.extraction import (
     ValidationFailure,
 )
 from extractor.schemas import TermsOfService
-from tests.staging import StagedProvider
+from tests.staging import PortFactory, StagedProvider
 
 
 class CliResult(NamedTuple):

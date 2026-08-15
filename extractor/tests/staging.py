@@ -5,7 +5,13 @@ can satisfy that protocol without constructing a chat model or naming a provider
 `test_cli.py` and `test_live.py`, which both need it and would otherwise copy it.
 """
 
-from extractor.extraction import ExtractionPort, PortFactory, PortSettings
+from collections.abc import Callable
+
+from extractor.extraction import ExtractionPort, PortSettings
+
+type PortFactory = Callable[[PortSettings], ExtractionPort]
+"""Construct a port from settings. Only tests name this now: production reaches a port through
+`Provider.build_port`, which is the seam `main` depends on."""
 
 
 class StagedProvider:

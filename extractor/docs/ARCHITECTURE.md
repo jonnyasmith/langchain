@@ -2,7 +2,7 @@
 
 > **Status:** Current implementation
 >
-> **Verification basis:** `d0a9856`
+> **Verification basis:** `d8a79e5`
 
 ## 1. Executive summary
 
@@ -79,11 +79,6 @@ Outside the boundary: provider services, the filesystem the document is read fro
    `SCHEMAS`, not by the type system, so a newly registered schema cannot escape the contract.
    See ADR-0001.
 
-9. **Resolution decides; `main` acts.** `resolve` returns a value and never constructs a port,
-   reads a document, or writes a diagnostic. Every argument check therefore happens before
-   anything costs money or touches the filesystem, and that ordering is structural rather than
-   a sequence `main` has to preserve.
-
 6. **The extracted object is the only thing on stdout.** Every diagnostic goes to stderr,
    including the `--debug` raw message dump. Enforced by `_report` being the sole writer of
    outcome output, and by CLI tests that assert stdout is empty on failure.
@@ -96,6 +91,11 @@ Outside the boundary: provider services, the filesystem the document is read fro
    rather than degrade when enforcement cannot be guaranteed. On an aggregator that means
    sending the routing guard, so an endpoint that cannot enforce the schema is never selected.
    Enforced by ADR-0001, adapter binding tests, the emitted-request test, and review.
+
+9. **Resolution decides; `main` acts.** `resolve` returns a value and never constructs a port,
+   reads a document, or writes a diagnostic. Every argument check therefore happens before
+   anything costs money or touches the filesystem, and that ordering is structural rather than
+   a sequence `main` has to preserve.
 
 ## 4. Components and dependencies
 
@@ -324,7 +324,9 @@ classes of both by name.
 - `tests/test_extraction.py` covers all three adapters at two seams. Outcome tests build a
   `ProviderAdapter` whose `build_model` returns a canned chat model — classification, each
   provider's refusal reporting, the debug dump, the binding arguments, and both exception
-  funnels. Configuration tests substitute the SDK class in the module namespace, because the
+  funnels. OpenRouter has no outcome tests of its own: at this seam it *is* the OpenAI family
+  integration, which one registry assertion pins directly rather than re-running those tests
+  against an identically built model. Configuration tests substitute the SDK class in the module namespace, because the
   arguments handed to it are visible nowhere else: every reasoning translation, each model
   configuration, the per-provider key check, and the aggregator's emitted request against a
   loopback stub.
@@ -332,7 +334,9 @@ classes of both by name.
   per-provider default models and the `--model` override, the input and configuration paths, and
   pins the exit numbers directly.
 - `tests/staging.py` holds `StagedProvider`, which satisfies the `Provider` protocol from a
-  default model and a port factory. Shared by the CLI, live, and invocation tests.
+  default model and a port factory, and the `PortFactory` alias itself — production reaches a
+  port through `Provider.build_port`, so nothing in `src/` names it. Shared by the CLI, live,
+  and invocation tests.
 - `tests/test_live.py` holds the only tests that let a real provider enforce the schema: one per
   provider, because one test cannot prove three different enforcement mechanisms. They are
   marked `live` and deselected by default (`addopts = "-m 'not live'"`), each skips loudly when
@@ -375,7 +379,7 @@ only mechanism.
 | `src/extractor/__main__.py` | Entry point, `ExitCode`, `_report`, `_report_intake`, `_report_invocation`, the exhaustive matches |
 | `src/extractor/invocation.py` | `resolve`, the argument parser, `Invocation`, `SchemaListing`, the `InvocationFailure` and `Resolution` unions |
 | `src/extractor/credentials.py` | `required_key`, `ENV_FILE`, `ConfigurationError` |
-| `src/extractor/extraction.py` | The `Extraction` union, `ExtractionPort`, `PortFactory`, the `Provider` protocol, `Integration`, `ProviderAdapter`, `PROVIDERS`, all provider vocabulary |
+| `src/extractor/extraction.py` | The `Extraction` union, `ExtractionPort`, the `Provider` protocol, `Integration`, `ProviderAdapter`, `PROVIDERS`, all provider vocabulary |
 | `src/extractor/intake.py` | `load_source_document`, the `Intake` and `IntakeFailure` unions, `MAX_DOCUMENT_CHARACTERS` |
 | `src/extractor/schemas.py` | `TermsOfService`, the `SCHEMAS` registry |
 | `pyproject.toml` | Dependencies, dev group, ruff, mypy strict plus the `pydantic.mypy` plugin, pytest markers and default deselection |
