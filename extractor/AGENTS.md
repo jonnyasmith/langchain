@@ -4,6 +4,8 @@
 
 ### This context
 
+- How the module fits together today, as orientation → ARCHITECTURE.md (descriptive;
+  CODING_STANDARDS.md and docs/adr/ govern where they disagree)
 - How this module is written, and the idioms it rejects → CODING_STANDARDS.md
 - Extractor vocabulary → docs/agents/domain.md
 - Extractor decisions → docs/adr/

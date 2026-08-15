@@ -56,6 +56,10 @@ it is authoritative — `docs/adr/`.
   Renumbering a member is a breaking change.
 - MUST assign an outcome's status and diagnostic in `_report` and nowhere else.
 - MUST write the extracted object to stdout and every diagnostic to stderr.
+- MUST update `ARCHITECTURE.md` in the change that moves ownership between modules, reverses a
+  dependency, adds or removes an `Extraction` member, alters an exit number, or changes a hard
+  limit. It describes the module as it is; a stale description is read with the same trust as
+  a rule.
 
 ## Tests
 
