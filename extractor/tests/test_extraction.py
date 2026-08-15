@@ -4,12 +4,14 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
+import httpx2
 import pytest
 from langchain_core.callbacks.manager import CallbackManagerForLLMRun
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_openai import ChatOpenAI
 from langchain_openai.chat_models.base import OpenAIRefusalError
+from openai import APIError, BadRequestError, NotFoundError, UnprocessableEntityError
 from pydantic import SecretStr
 
 from extractor.extraction import (
@@ -17,6 +19,10 @@ from extractor.extraction import (
     EmptyExtraction,
     Extracted,
     Extraction,
+    PortSettings,
+    ProviderFailure,
+    ProviderRejectedRequest,
+    ReasoningLevel,
     Refusal,
     ValidationFailure,
     _load_env_file,
@@ -85,7 +91,7 @@ def extract_from(
     debug: StringIO | None = None,
 ) -> Extraction:
     StubbedProvider(response).install(monkeypatch)
-    port = build_openai_port("gpt-5-nano", debug)
+    port = build_openai_port(PortSettings("gpt-5-nano", ReasoningLevel.MEDIUM, debug))
     return port("Terms of Service source", TermsOfService)
 
 
@@ -167,17 +173,28 @@ def test_without_a_debug_stream_the_raw_message_is_not_dumped(
     assert capsys.readouterr() == ("", "")
 
 
-def test_the_model_is_the_named_cheap_deterministic_tier(
+@pytest.mark.parametrize(
+    ("reasoning", "provider_spelling"),
+    [
+        (ReasoningLevel.OFF, "none"),
+        (ReasoningLevel.LOW, "low"),
+        (ReasoningLevel.MEDIUM, "medium"),
+        (ReasoningLevel.HIGH, "high"),
+    ],
+)
+def test_each_reasoning_level_reaches_openai_in_its_own_spelling(
     monkeypatch: pytest.MonkeyPatch,
+    reasoning: ReasoningLevel,
+    provider_spelling: str,
 ) -> None:
     provider = StubbedProvider(parsed_message(VALID_FACTS))
     provider.install(monkeypatch)
 
-    build_openai_port("gpt-5-mini", None)
+    build_openai_port(PortSettings("gpt-5-mini", reasoning, None))
 
     assert provider.configuration == {
         "model": "gpt-5-mini",
-        "reasoning_effort": "none",
+        "reasoning_effort": provider_spelling,
         "temperature": 0,
         "timeout": 60,
         "max_retries": 2,
@@ -193,7 +210,7 @@ def test_a_missing_api_key_fails_before_the_model_is_built(
     monkeypatch.setattr("extractor.extraction._load_env_file", lambda _: None)
 
     with pytest.raises(ConfigurationError, match="OPENAI_API_KEY"):
-        build_openai_port("gpt-5-nano", None)
+        build_openai_port(PortSettings("gpt-5-nano", ReasoningLevel.MEDIUM, None))
 
     assert not provider.built
 
@@ -216,7 +233,7 @@ def test_the_binding_asks_the_provider_to_enforce_the_schema(
 
     monkeypatch.setattr(ChatOpenAI, "with_structured_output", record)
 
-    port = build_openai_port("gpt-5-nano", None)
+    port = build_openai_port(PortSettings("gpt-5-nano", ReasoningLevel.MEDIUM, None))
     port("Terms of Service source", TermsOfService)
 
     assert bindings == [
@@ -235,9 +252,52 @@ def test_the_key_is_read_from_the_app_local_dotenv(monkeypatch: pytest.MonkeyPat
     loaded: list[Path] = []
     monkeypatch.setattr("extractor.extraction._load_env_file", loaded.append)
 
-    build_openai_port("gpt-5-nano", None)
+    build_openai_port(PortSettings("gpt-5-nano", ReasoningLevel.MEDIUM, None))
 
     assert loaded == [Path(__file__).resolve().parents[1] / ".env"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        BadRequestError(
+            "bad request",
+            response=httpx2.Response(400, request=httpx2.Request("POST", "https://provider.test")),
+            body=None,
+        ),
+        NotFoundError(
+            "not found",
+            response=httpx2.Response(404, request=httpx2.Request("POST", "https://provider.test")),
+            body=None,
+        ),
+        UnprocessableEntityError(
+            "unprocessable",
+            response=httpx2.Response(422, request=httpx2.Request("POST", "https://provider.test")),
+            body=None,
+        ),
+    ],
+)
+def test_each_rejected_request_class_becomes_a_provider_rejected_request(
+    monkeypatch: pytest.MonkeyPatch,
+    error: APIError,
+) -> None:
+    outcome = extract_from(monkeypatch, error)
+
+    assert outcome == ProviderRejectedRequest(detail=str(error))
+
+
+def test_the_provider_family_base_class_becomes_a_provider_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = APIError(
+        "provider unavailable",
+        request=httpx2.Request("POST", "https://provider.test"),
+        body=None,
+    )
+
+    outcome = extract_from(monkeypatch, error)
+
+    assert outcome == ProviderFailure(detail=str(error))
 
 
 def test_the_env_file_defines_a_key_the_environment_lacks(

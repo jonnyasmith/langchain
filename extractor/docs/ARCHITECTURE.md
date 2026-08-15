@@ -2,7 +2,7 @@
 
 > **Status:** Current implementation
 >
-> **Verification basis:** `df3a855`
+> **Verification basis:** `2858bcd`
 
 ## 1. Executive summary
 
@@ -10,11 +10,12 @@ The extractor is a one-shot command line tool. You give it one messy document an
 a schema. It gives you back one validated JSON object on stdout, or it names exactly why it
 could not.
 
-It has four modules and no state. `__main__.py` parses the command line and decides the exit
-code. `intake.py` turns a path or `-` into a document string. `schemas.py` holds the Pydantic
-models that define what can be extracted. `extraction.py` wraps OpenAI: it builds the prompt,
-binds the schema with provider-enforced strict mode, makes the call, and translates everything
-that can happen into one of six named outcomes.
+It has four modules and no state. `__main__.py` parses the command line, resolves the selected
+provider through the registry, and decides the exit code. `intake.py` turns a path or `-` into a
+document string. `schemas.py` holds the Pydantic models that define what can be extracted.
+`extraction.py` owns the provider registry and adapters: it builds the prompt, binds the schema
+through a provider-enforced path, makes the call, and translates everything that can happen into
+one of six named outcomes.
 
 There is no database and no cache. The only data that outlives a run is what the caller
 redirects from stdout. The rule a contributor must not break: an extraction attempt returns a
@@ -28,10 +29,10 @@ union exhaustively. `mypy --strict` is what enforces it, so `uv run mypy` is not
       |
       | argv, stdin, extractor/.env
       v
-+-----------------+          strict json_schema call        +----------+
-|   extractor     | -------------------------------------> | OpenAI   |
-|   (one process) | <------------------------------------- | API      |
-+-----------------+          object, refusal, or error      +----------+
++-----------------+       enforced structured output       +------------+
+|   extractor     | -------------------------------------> | selected   |
+|   (one process) | <------------------------------------- | provider   |
++-----------------+       object, refusal, or error         +------------+
       |        |
       |        +--> stderr: diagnostics, optional raw message dump
       +-----------> stdout: one JSON object, or the schema name list
@@ -40,16 +41,15 @@ union exhaustively. `mypy --strict` is what enforces it, so `uv run mypy` is not
 Inside the boundary: argument parsing, document intake, the character ceiling, prompt
 assembly, the schema binding, outcome classification, and exit codes.
 
-Outside the boundary: the OpenAI service, the filesystem the document is read from, and the
-`.env` file that supplies the API key.
+Outside the boundary: provider services, the filesystem the document is read from, and the
+`.env` file that supplies provider credentials.
 
 ## 3. Architectural invariants
 
-1. **An extraction attempt returns a value, never raises.** The adapter's `extract` closure
-   catches `OpenAIRefusalError`, the rejected-request exception classes, and the SDK base
-   `APIError`, and returns an outcome for each. Enforced by the catch order in
-   `src/extractor/extraction.py:109-127`; the base `APIError` catch is last so a new SDK
-   subclass degrades to `ProviderFailure` rather than escaping.
+1. **An extraction attempt returns a value, never raises.** Each adapter catches its provider's
+   refusal, rejected-request, and family-base exceptions, and returns an outcome for each.
+   Specific rejected-request classes are caught before the family base so a new SDK subclass
+   degrades to `ProviderFailure` rather than escaping. The OpenAI funnel is exercised offline.
 
 2. **Outcomes are a closed union, matched exhaustively.** `Extraction` is a `type` alias over
    six frozen dataclasses. `_report` ends its `match` with `case unreachable:
@@ -62,11 +62,12 @@ Outside the boundary: the OpenAI service, the filesystem the document is read fr
    `main`.
 
 4. **No provider or framework type crosses into the CLI.** `__main__.py` imports only from
-   `extractor.*`. `ExtractionPort`'s signature is `(str, type[BaseModel]) -> Extraction`.
-   Enforced structurally by the Protocol signature and by review of imports.
+   `extractor.*`. The registry in `extraction.py` is the sole place provider names appear as
+   strings; the CLI only looks up the parsed value. `ExtractionPort` remains
+   `(str, type[BaseModel]) -> Extraction`.
 
-5. **Every schema field is required and nullable with no default.** OpenAI strict mode demands
-   it. Enforced by a test that reads the generated JSON schema
+5. **Every schema field is required and nullable with no default.** Enforced structured output
+   demands it. Enforced by a test that reads the generated JSON schema
    (`tests/test_schemas.py:19`), not by the type system. See ADR-0001.
 
 6. **The extracted object is the only thing on stdout.** Every diagnostic goes to stderr,
@@ -76,18 +77,19 @@ Outside the boundary: the OpenAI service, the filesystem the document is read fr
 7. **Exit code numbers are published.** `README.md` documents them and
    `tests/test_cli.py:350` pins each member's integer. Renumbering is a breaking change.
 
-8. **One implementation of `ExtractionPort` in production.** A second adapter would satisfy
-   the Protocol and typecheck while silently dropping `strict=True`. Enforced by ADR-0001 and
-   review only; nothing mechanical prevents it.
+8. **Every registered adapter enforces the schema provider-side.** An adapter must bind through
+   its provider's enforced structured-output path and fail rather than degrade when enforcement
+   cannot be guaranteed. Enforced by ADR-0001, adapter binding tests, and review.
 
 ## 4. Components and dependencies
 
 Dependencies point one way: `__main__` depends on `intake`, `schemas`, and `extraction`.
 Nothing depends on `__main__`. `intake` and `schemas` depend on nothing in the module.
 
-**`__main__.py`** owns argument parsing, the `ExitCode` enum, the outcome-to-exit-code mapping,
-and the top-level error net. It does not own how a document is read, what the schemas are, or
-how the provider is called. It never imports LangChain or OpenAI.
+**`__main__.py`** owns argument parsing, manual provider and reasoning validation, the
+`ExitCode` enum, the outcome-to-exit-code mapping, and the top-level error net. It does not own
+how a document is read, what the schemas are, or how a provider is called. It never imports
+LangChain or a provider SDK.
 
 **`intake.py`** owns reading stdin or a UTF-8 file, the 100,000-character ceiling, and the
 classification of a refusal into `UnreadableSource` or `OversizeDocument`. It does not own the
@@ -98,33 +100,35 @@ split `extraction.py` and `_report` use. It is deliberately not a seam.
 field descriptions, which are prompt surface as well as validation. It does not own schema
 selection or error reporting.
 
-**`extraction.py`** owns everything provider-shaped: `_load_env_file`, the `ChatOpenAI`
-construction, the `ChatPromptTemplate`, `with_structured_output(..., method="json_schema",
-strict=True, include_raw=True)`, the debug dump, the exception-to-outcome mapping, and the six
-outcome dataclasses. It also declares `ExtractionPort` even though `__main__` is the consumer,
-because the union lives here. It does not own exit codes or any output formatting other than
-the debug dump.
+**`extraction.py`** owns everything provider-shaped: the provider registry, frozen
+`PortSettings`, `_load_env_file`, provider model construction, `ChatPromptTemplate`, enforced
+structured-output binding, debug dumps, exception-to-outcome mapping, and the six outcome
+dataclasses. It also declares `ExtractionPort` because the union lives here. It does not own exit
+codes or any output formatting other than adapter debug dumps.
 
-The seam between the CLI and the provider is `PortFactory = Callable[[str, TextIO | None],
-ExtractionPort]`. `main` takes it as a keyword-only parameter defaulting to `build_openai_port`,
-which is how every CLI test reaches `main` without a provider.
+The seam between the CLI and providers is `PortFactory = Callable[[PortSettings],
+ExtractionPort]`. `PortSettings` carries the model id, provider-neutral reasoning level, and
+optional debug stream. `main` receives a mapping of provider names to these factories, defaulting
+to `PROVIDERS`; CLI tests substitute the mapping without importing a provider or framework type.
 
 ## 5. Critical flows
 
 ### Successful extraction
 
-1. `main` parses argv. `--list-schemas` short-circuits: it writes sorted names to stdout and
-   returns `OK`.
+1. `main` catches argument-parser exits and returns `FAILURE`. It manually validates
+   `--provider` and `--reasoning`, listing valid values and returning `FAILURE` before document
+   intake or provider construction on an unknown value. `--list-schemas` then short-circuits:
+   it writes sorted names to stdout and returns `OK`.
 2. Missing `--schema` or missing input path writes an input error and returns `FAILURE`.
 3. An unrecognised schema name writes the valid names and returns `FAILURE`. No provider call
    happens, and no document is read.
 4. `load_source_document` reads stdin or the file. Anything that is not a `str` goes to
    `_report_intake`, which writes the diagnostic and returns `FAILURE`.
-5. `port_factory(model_id, debug_stream)` runs. `build_openai_port` loads
+5. The selected factory receives one frozen `PortSettings`. The OpenAI adapter loads
    `extractor/.env`, raises `ConfigurationError` if that file is unreadable or if
-   `OPENAI_API_KEY` is absent, then constructs
-   `ChatOpenAI(reasoning_effort="none", temperature=0, timeout=60, max_retries=2)` and the
-   prompt template. Construction happens after intake, so an oversize document costs nothing.
+   `OPENAI_API_KEY` is absent, then constructs `ChatOpenAI` with the selected model and maps
+   reasoning `off` to `none`; `low`, `medium`, and `high` retain their spelling. Construction
+   happens after intake, so an oversize document costs nothing.
 6. `extract(document, schema)` binds the schema strictly, invokes `prompt | structured_model`,
    and inspects the `{"raw", "parsed", "parsing_error"}` dict.
 7. If `--debug` was passed, the raw message is written to stderr before classification.
@@ -150,8 +154,9 @@ because the request itself is malformed.
 
 ## 6. Interfaces and data
 
-**Command line:** `python -m extractor [input] --schema NAME [--model ID] [--list-schemas]
-[--debug]`. `input` is a path or `-` for stdin. Default model is `gpt-5-nano`.
+**Command line:** `python -m extractor [input] --schema NAME [--provider NAME] [--model ID]
+[--reasoning off|low|medium|high] [--list-schemas] [--debug]`. The provider defaults to the
+registry's OpenAI entry, the model defaults to `gpt-5-nano`, and reasoning defaults to `medium`.
 
 **Exit codes** (published in `README.md`, pinned by test):
 
@@ -209,8 +214,8 @@ One document, one call, one process. No concurrency primitives and no context th
 Splitting a document is `rag/`'s concern.
 
 Hard limits: 100,000 characters per document, a 60-second request timeout, two SDK retries.
-Model temperature is 0 and `reasoning_effort` is `"none"`, so runs are as deterministic as the
-provider allows.
+Model temperature is 0. Reasoning defaults to `medium`; `off` is available for operators who
+prefer the cheapest and most repeatable setting the provider offers.
 
 Partial failure does not exist here: an extraction either yields an object or yields one named
 failure. There is no partial result and no resumption.
@@ -228,10 +233,9 @@ pytest`. There is no task runner and the module forbids adding one.
   reading the generated JSON schema. This is the only check on invariant 5.
 - `tests/test_intake.py` covers stdin, UTF-8 files, missing and unreadable paths, undecodable
   bytes, and both sides of the ceiling boundary.
-- `tests/test_extraction.py` covers the adapter's classification of parsed objects, empty
-  answers, schema rejections, refusals from both the raw message and a raised exception, the
-  debug stream branches, the model configuration, the missing-key failure, the strict binding
-  arguments, and the `.env` path including its precedence against an exported key.
+- `tests/test_extraction.py` covers adapter classification, raw-message and raised refusals,
+  debug stream branches, all reasoning translations, the model configuration, missing-key
+  failure, strict binding arguments, `.env` handling, and every OpenAI exception mapping.
 - `tests/test_cli.py` covers each outcome's exit code and stderr line through a staged port,
   the input and configuration paths, and pins the exit numbers directly.
 - `tests/test_live.py` is the only test that lets the real provider enforce the schema. It is
@@ -242,23 +246,16 @@ pytest`. There is no task runner and the module forbids adding one.
 The default run passes offline with no API key. `mypy --strict` is load-bearing for invariant
 2, not hygiene.
 
-Unverified:
-
-- The adapter's exception-to-outcome mapping for `APIError`, `BadRequestError`,
-  `NotFoundError`, and `UnprocessableEntityError` has no test. ADR-0004 records this
-  deliberately: `mypy --strict` and review are the available proof. Verifying it would need a
-  test that installs a stubbed provider raising each exception class, in the shape
-  `tests/test_extraction.py` already uses for `OpenAIRefusalError`.
-- Nothing in a default run notices when the live test's assertions are weakened, because the
-  test is deselected. ADR-0003 states plainly that reading the assertions is the only
-  mechanism.
+The adapter exception-to-outcome mapping is verified offline through the substituted
+chat-model seam. Nothing in a default run notices when the live test's assertions are weakened,
+because that test is deselected; ADR-0003 states plainly that reading those assertions is the
+only mechanism.
 
 ## 10. Known limitations
 
 - One schema ships (`tos`). The registry is closed to user-supplied schemas.
-- The module is pinned to OpenAI. `strict=True` is discarded silently by non-OpenAI providers,
-  so changing `--model` to another vendor's id degrades enforcement with no error and no
-  warning. ADR-0001.
+- Only OpenAI is registered today. The registry and frozen settings seam make additional
+  enforcing adapters bounded additions without changing the CLI or extraction port.
 - No prompt-injection defence, as described in section 7.
 - `ProviderFailure` covers a wide range: credentials, quota, rate limits, server errors,
   network, and timeout all collapse to exit 5 with the provider's rendered text as the only
@@ -278,7 +275,7 @@ Unverified:
 | `AGENTS.md` | Verification commands and module-level prohibitions |
 | `CODING_STANDARDS.md` | The rules every change must hold, and the rejected alternatives |
 | `docs/agents/domain.md` | Vocabulary: outcome, port, absent field, intake |
-| `docs/adr/0001-strict-json-schema-pins-openai.md` | Why the module is OpenAI-only |
+| `docs/adr/0001-provider-adapters-must-enforce-the-schema.md` | Why every provider must enforce the schema |
 | `docs/adr/0002-extraction-outcomes-are-a-closed-union.md` | Why outcomes are a union behind a consumer-declared port |
 | `docs/adr/0003-the-live-test-asserts-absent-fields-not-model-wording.md` | What the paid test must assert |
 | `docs/adr/0004-provider-failures-are-extraction-outcomes.md` | Provider failure versus rejected request, and the skip-versus-fail rule |

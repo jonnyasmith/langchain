@@ -11,7 +11,7 @@ Feed it a scraped Terms of Service page or a cluttered email thread. A `ChatProm
 - Validated JSON on stdout and diagnostics on stderr
 - Distinct validation, empty-extraction, refusal, provider-failure, and rejected-request outcomes
 - File and stdin input with a 100,000-character safety limit
-- App-local OpenAI configuration with a model override, a 60-second request timeout, and two retries
+- Provider selection, model override, and provider-neutral reasoning control
 
 ## Requirements
 
@@ -67,16 +67,17 @@ List the available named schemas:
 uv run python -m extractor --list-schemas
 ```
 
-The default model is `gpt-5-nano`. Use `--model MODEL_ID` to override it and `--debug`
-to dump the raw model message to stderr. Provider calls use a 60-second request timeout
-and two SDK retries.
+The default provider is `openai`, the default model is `gpt-5-nano`, and reasoning defaults to
+`medium`. Use `--provider PROVIDER`, `--model MODEL_ID`, and
+`--reasoning off|low|medium|high` to choose them. Use `--debug` to dump the raw model message to
+stderr. Provider calls use a 60-second request timeout and two SDK retries.
 
 Exit statuses are:
 
 | Status | Meaning |
 | ---: | --- |
 | 0 | Successful extraction |
-| 1 | Input, configuration, oversize-document, or unexpected failure |
+| 1 | Bad invocation, unknown provider/reasoning/schema, input, configuration, oversize-document, or unexpected failure |
 | 2 | Schema validation failure |
 | 3 | Empty extraction |
 | 4 | Provider refusal |
