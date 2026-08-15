@@ -2,7 +2,7 @@
 
 > **Status:** Current implementation
 >
-> **Verification basis:** issue #12
+> **Verification basis:** `2858bcd`
 
 ## 1. Executive summary
 
