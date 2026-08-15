@@ -8,9 +8,10 @@ from typing import NamedTuple
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from extractor.__main__ import DEFAULT_MODEL, ExitCode, main
+from extractor.__main__ import ExitCode, main
 from extractor.extraction import (
     DEFAULT_PROVIDER,
+    PROVIDERS,
     REASONING_LEVELS,
     EmptyExtraction,
     Extracted,
@@ -18,6 +19,7 @@ from extractor.extraction import (
     ExtractionPort,
     PortFactory,
     PortSettings,
+    Provider,
     ProviderFailure,
     ProviderRejectedRequest,
     ReasoningLevel,
@@ -88,11 +90,12 @@ def run_cli(
     *,
     source: str = "",
     port_factory: PortFactory = tripwire_port,
+    provider: str = DEFAULT_PROVIDER,
 ) -> CliResult:
     exit_code = main(
         argv,
         stdin=StringIO(source),
-        providers={DEFAULT_PROVIDER: port_factory},
+        providers={provider: Provider(PROVIDERS[provider].default_model, port_factory)},
     )
     captured = capsys.readouterr()
     return CliResult(exit_code, captured.out, captured.err)
@@ -121,7 +124,9 @@ def test_a_valid_extraction_is_the_only_stdout_and_exits_zero(
 
     assert result == CliResult(ExitCode.OK, json.dumps(expected, separators=(",", ":")) + "\n", "")
     assert staged.documents == ["Terms of Service source"]
-    assert staged.settings == [PortSettings(DEFAULT_MODEL, ReasoningLevel.MEDIUM, None)]
+    assert staged.settings == [
+        PortSettings(PROVIDERS[DEFAULT_PROVIDER].default_model, ReasoningLevel.MEDIUM, None)
+    ]
 
 
 def test_an_invalid_model_value_is_a_validation_failure(
@@ -369,27 +374,49 @@ def test_the_documented_exit_numbers_are_pinned() -> None:
     assert isinstance(ExitCode.REFUSAL, int)
 
 
-def test_the_default_model_is_the_cheap_tier(capsys: pytest.CaptureFixture[str]) -> None:
+def test_each_provider_registers_its_published_default_model() -> None:
+    """`README.md` and the architecture document publish these; the registry is their source."""
+    assert {name: provider.default_model for name, provider in PROVIDERS.items()} == {
+        "openai": "gpt-5-nano",
+        "anthropic": "claude-sonnet-5",
+        "openrouter": "openai/gpt-5-nano",
+    }
+
+
+@pytest.mark.parametrize("provider", sorted(PROVIDERS))
+def test_an_omitted_model_flag_takes_the_selected_providers_own_default(
+    capsys: pytest.CaptureFixture[str], provider: str
+) -> None:
     staged = StagedPort(EmptyExtraction())
 
-    run_cli(capsys, ["--schema", "tos", "-"], source="source", port_factory=staged)
+    run_cli(
+        capsys,
+        ["--provider", provider, "--schema", "tos", "-"],
+        source="source",
+        port_factory=staged,
+        provider=provider,
+    )
 
-    assert staged.settings[-1].model_id == DEFAULT_MODEL
+    assert staged.settings[-1].model_id == PROVIDERS[provider].default_model
 
 
-def test_the_model_flag_overrides_the_default(capsys: pytest.CaptureFixture[str]) -> None:
+@pytest.mark.parametrize("provider", sorted(PROVIDERS))
+def test_the_model_flag_overrides_the_default_on_every_provider(
+    capsys: pytest.CaptureFixture[str], provider: str
+) -> None:
     """A document the default cannot handle is the reason the flag exists; nothing else in the
     suite notices if the parsed value never reaches the port factory."""
     staged = StagedPort(EmptyExtraction())
 
     run_cli(
         capsys,
-        ["--model", "gpt-5", "--schema", "tos", "-"],
+        ["--provider", provider, "--model", "pinned-model", "--schema", "tos", "-"],
         source="source",
         port_factory=staged,
+        provider=provider,
     )
 
-    assert staged.settings[-1].model_id == "gpt-5"
+    assert staged.settings[-1].model_id == "pinned-model"
 
 
 def test_an_explicit_openai_provider_matches_the_default(

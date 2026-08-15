@@ -5,6 +5,8 @@ description = "CLI that turns messy raw text into a strictly typed JSON object"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "anthropic>=0.122",
+    "langchain-anthropic>=1.0",
     "langchain-core>=1.5",
     "langchain-openai>=1.5",
     "openai>=3.0",
@@ -41,6 +43,7 @@ select = [
 ]
 
 [tool.mypy]
+plugins = ["pydantic.mypy"]
 python_version = "3.14"
 files = ["src", "tests"]
 strict = true

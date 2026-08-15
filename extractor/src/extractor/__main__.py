@@ -12,8 +12,8 @@ from extractor.extraction import (
     EmptyExtraction,
     Extracted,
     Extraction,
-    PortFactory,
     PortSettings,
+    Provider,
     ProviderFailure,
     ProviderRejectedRequest,
     ReasoningLevel,
@@ -46,14 +46,11 @@ class ExitCode(IntEnum):
     PROVIDER_REJECTED_REQUEST = 6
 
 
-DEFAULT_MODEL = "gpt-5-nano"
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Extract typed data from one source document.")
     parser.add_argument("input", nargs="?", help="source file path, or - to read stdin")
     parser.add_argument("--schema", help="named extraction schema")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="provider model id")
+    parser.add_argument("--model", help="provider model id; defaults to the provider's own")
     parser.add_argument("--provider", default=DEFAULT_PROVIDER, help="extraction provider")
     valid_reasoning = ", ".join(REASONING_LEVELS)
     parser.add_argument(
@@ -121,7 +118,7 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     stdin: TextIO = sys.stdin,
-    providers: Mapping[str, PortFactory] = PROVIDERS,
+    providers: Mapping[str, Provider] = PROVIDERS,
 ) -> ExitCode:
     try:
         args = _parser().parse_args(argv)
@@ -129,8 +126,8 @@ def main(
         if request.code == 0:
             return ExitCode.OK
         return ExitCode.FAILURE
-    port_factory = providers.get(args.provider)
-    if port_factory is None:
+    provider = providers.get(args.provider)
+    if provider is None:
         valid_names = ", ".join(sorted(providers))
         sys.stderr.write(f"Unknown provider {args.provider!r}. Valid providers: {valid_names}.\n")
         return ExitCode.FAILURE
@@ -156,12 +153,12 @@ def main(
     if not isinstance(document, str):
         return _report_intake(document)
     settings = PortSettings(
-        model_id=args.model,
+        model_id=args.model or provider.default_model,
         reasoning=reasoning,
         debug=sys.stderr if args.debug else None,
     )
     try:
-        extract = port_factory(settings)
+        extract = provider.build_port(settings)
         outcome = extract(document, schema)
     except ConfigurationError as error:
         sys.stderr.write(f"Configuration error: {error}\n")
