@@ -93,10 +93,17 @@ def _load_env_file(path: Path) -> None:
     Ten lines rather than a dependency, per the coding standards. An exported variable always
     wins, so a stale file cannot shadow the shell. No interpolation, `export` prefixes, or
     multi-line values: the extractor reads one key.
+
+    A file that exists but cannot be read is a misconfiguration, not an unexpected state, so
+    it raises `ConfigurationError` rather than leaking an `OSError` into the top-level net.
     """
     if not path.is_file():
         return
-    for line in path.read_text(encoding="utf-8").splitlines():
+    try:
+        contents = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise ConfigurationError(f"cannot read {path}: {error}") from error
+    for line in contents.splitlines():
         entry = line.strip()
         if not entry or entry.startswith("#") or "=" not in entry:
             continue

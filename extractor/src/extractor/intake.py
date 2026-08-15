@@ -21,7 +21,11 @@ class OversizeDocument:
     ceiling: int
 
 
-type Intake = str | UnreadableSource | OversizeDocument
+type IntakeFailure = UnreadableSource | OversizeDocument
+"""Why there is no document to extract from. Named once here, so a new member reaches
+`__main__`'s match as a type error rather than only as a widened call argument."""
+
+type Intake = str | IntakeFailure
 
 
 def _detail(error: OSError | UnicodeDecodeError) -> str:

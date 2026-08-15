@@ -16,7 +16,12 @@ from extractor.extraction import (
     ValidationFailure,
     build_openai_port,
 )
-from extractor.intake import OversizeDocument, UnreadableSource, load_source_document
+from extractor.intake import (
+    IntakeFailure,
+    OversizeDocument,
+    UnreadableSource,
+    load_source_document,
+)
 from extractor.schemas import SCHEMAS
 
 
@@ -82,7 +87,7 @@ def _report(outcome: Extraction) -> ExitCode:
             assert_never(unreachable)
 
 
-def _report_intake(failure: UnreadableSource | OversizeDocument) -> ExitCode:
+def _report_intake(failure: IntakeFailure) -> ExitCode:
     """Write an intake failure's diagnostic and return the exit code it earns.
 
     Both members share `FAILURE`, per the `ExitCode` docstring; only the wording differs.

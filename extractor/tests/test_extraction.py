@@ -1,4 +1,5 @@
 import os
+import re
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -279,4 +280,25 @@ def test_the_env_file_ignores_blank_lines_and_comments(
 
 
 def test_a_missing_env_file_is_not_an_error(tmp_path: Path) -> None:
+    """Returning rather than raising is the assertion: a first run has no `.env` and the key
+    may be exported instead, so an absent file must not fail the extractor."""
     _load_env_file(tmp_path / ".env")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 file regardless")
+def test_an_unreadable_env_file_is_a_configuration_error(tmp_path: Path) -> None:
+    """A present-but-unreadable file is a misconfiguration, not an `Unexpected error`."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENAI_API_KEY=file-key\n", encoding="utf-8")
+    env_file.chmod(0o000)
+
+    with pytest.raises(ConfigurationError, match=re.escape(str(env_file))):
+        _load_env_file(env_file)
+
+
+def test_a_non_utf8_env_file_is_a_configuration_error(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_bytes(b"OPENAI_API_KEY=caf\xe9\n")
+
+    with pytest.raises(ConfigurationError, match=re.escape(str(env_file))):
+        _load_env_file(env_file)

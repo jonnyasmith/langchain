@@ -121,7 +121,8 @@ which is how every CLI test reaches `main` without a provider.
 4. `load_source_document` reads stdin or the file. Anything that is not a `str` goes to
    `_report_intake`, which writes the diagnostic and returns `FAILURE`.
 5. `port_factory(model_id, debug_stream)` runs. `build_openai_port` loads
-   `extractor/.env`, raises `ConfigurationError` if `OPENAI_API_KEY` is absent, then constructs
+   `extractor/.env`, raises `ConfigurationError` if that file is unreadable or if
+   `OPENAI_API_KEY` is absent, then constructs
    `ChatOpenAI(reasoning_effort="none", temperature=0, timeout=60, max_retries=2)` and the
    prompt template. Construction happens after intake, so an oversize document costs nothing.
 6. `extract(document, schema)` binds the schema strictly, invokes `prompt | structured_model`,
@@ -186,7 +187,9 @@ There is no identity or authorization inside the tool. It runs with the invoking
 permissions and reads whatever path they pass.
 
 The API key is the one secret. It is read from the process environment or `extractor/.env` by
-`_load_env_file` inside `build_openai_port`, never at import time. An exported variable wins
+`_load_env_file` inside `build_openai_port`, never at import time. A `.env` that exists but
+cannot be read raises `ConfigurationError` rather than leaking an `OSError` into the top-level
+net, and an absent one is not an error at all. An exported variable wins
 over the file, so a stale `.env` cannot shadow the shell. A missing key raises
 `ConfigurationError` before the model is constructed, so no call is attempted without one. The
 key is never written to stdout or stderr.
@@ -269,7 +272,7 @@ Unverified:
 | --- | --- |
 | `src/extractor/__main__.py` | Entry point, `ExitCode`, argument parsing, `_report`, `_report_intake`, the exhaustive matches |
 | `src/extractor/extraction.py` | The `Extraction` union, `ExtractionPort`, `PortFactory`, `build_openai_port`, all provider vocabulary |
-| `src/extractor/intake.py` | `load_source_document`, the `Intake` union, `MAX_DOCUMENT_CHARACTERS` |
+| `src/extractor/intake.py` | `load_source_document`, the `Intake` and `IntakeFailure` unions, `MAX_DOCUMENT_CHARACTERS` |
 | `src/extractor/schemas.py` | `TermsOfService`, the `SCHEMAS` registry |
 | `pyproject.toml` | Dependencies, dev group, ruff, mypy strict, pytest markers and default deselection |
 | `AGENTS.md` | Verification commands and module-level prohibitions |
