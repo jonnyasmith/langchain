@@ -16,19 +16,21 @@ import json
 import warnings
 from datetime import date
 from pathlib import Path
-from typing import TextIO
 
 import pytest
 from pydantic import BaseModel
 
 from extractor.__main__ import DEFAULT_MODEL, ExitCode, main
 from extractor.extraction import (
+    DEFAULT_PROVIDER,
     ConfigurationError,
     Extraction,
     ExtractionPort,
     PortFactory,
+    PortSettings,
     ProviderFailure,
     ProviderRejectedRequest,
+    ReasoningLevel,
     build_openai_port,
 )
 from extractor.schemas import TermsOfService
@@ -39,7 +41,7 @@ FIXTURE = Path(__file__).parent / "fixtures" / "terms.html"
 def _staged_port(outcome: Extraction) -> PortFactory:
     """Build a port factory that returns one prepared live-test outcome."""
 
-    def factory(_model_id: str, _debug: TextIO | None) -> ExtractionPort:
+    def factory(_settings: PortSettings) -> ExtractionPort:
         def extract(document: str, schema: type[BaseModel]) -> Extraction:
             return outcome
 
@@ -74,7 +76,7 @@ def configured_provider() -> None:
     during collection of a run that never intended to call a provider.
     """
     try:
-        build_openai_port(DEFAULT_MODEL, None)
+        build_openai_port(PortSettings(DEFAULT_MODEL, ReasoningLevel.MEDIUM, None))
     except ConfigurationError as error:
         message = (
             "LIVE TEST SKIPPED, NOT PASSED: no OPENAI_API_KEY, so the real provider was never "
@@ -90,7 +92,11 @@ def test_a_provider_failure_skips_the_unchecked_live_contract(
 ) -> None:
     exit_code = main(
         ["--schema", "tos", str(FIXTURE)],
-        port_factory=_staged_port(ProviderFailure(detail="Error code: 429 - quota exhausted")),
+        providers={
+            DEFAULT_PROVIDER: _staged_port(
+                ProviderFailure(detail="Error code: 429 - quota exhausted")
+            )
+        },
     )
     captured = capsys.readouterr()
 
@@ -106,9 +112,11 @@ def test_a_provider_rejected_request_fails_the_live_contract(
 ) -> None:
     exit_code = main(
         ["--schema", "tos", str(FIXTURE)],
-        port_factory=_staged_port(
-            ProviderRejectedRequest(detail="Error code: 404 - model does not exist")
-        ),
+        providers={
+            DEFAULT_PROVIDER: _staged_port(
+                ProviderRejectedRequest(detail="Error code: 404 - model does not exist")
+            )
+        },
     )
     captured = capsys.readouterr()
 

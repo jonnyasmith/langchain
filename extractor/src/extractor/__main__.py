@@ -1,20 +1,23 @@
 import argparse
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from enum import IntEnum
 from typing import TextIO, assert_never
 
 from extractor.extraction import (
+    DEFAULT_PROVIDER,
+    PROVIDERS,
+    REASONING_LEVELS,
     ConfigurationError,
     EmptyExtraction,
     Extracted,
     Extraction,
     PortFactory,
+    PortSettings,
     ProviderFailure,
     ProviderRejectedRequest,
     Refusal,
     ValidationFailure,
-    build_openai_port,
 )
 from extractor.intake import (
     IntakeFailure,
@@ -49,7 +52,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Extract typed data from one source document.")
     parser.add_argument("input", nargs="?", help="source file path, or - to read stdin")
     parser.add_argument("--schema", help="named extraction schema")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="OpenAI model id")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="provider model id")
+    parser.add_argument("--provider", default=DEFAULT_PROVIDER, help="extraction provider")
+    parser.add_argument(
+        "--reasoning", default="medium", help="reasoning effort: off, low, medium, or high"
+    )
     parser.add_argument("--list-schemas", action="store_true", help="list named schemas")
     parser.add_argument(
         "--debug", action="store_true", help="write the raw model message to stderr"
@@ -110,9 +117,24 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     stdin: TextIO = sys.stdin,
-    port_factory: PortFactory = build_openai_port,
+    providers: Mapping[str, PortFactory] = PROVIDERS,
 ) -> ExitCode:
-    args = _parser().parse_args(argv)
+    try:
+        args = _parser().parse_args(argv)
+    except SystemExit:
+        return ExitCode.FAILURE
+    port_factory = providers.get(args.provider)
+    if port_factory is None:
+        valid_names = ", ".join(sorted(providers))
+        sys.stderr.write(f"Unknown provider {args.provider!r}. Valid providers: {valid_names}.\n")
+        return ExitCode.FAILURE
+    reasoning = REASONING_LEVELS.get(args.reasoning)
+    if reasoning is None:
+        valid_levels = ", ".join(REASONING_LEVELS)
+        sys.stderr.write(
+            f"Unknown reasoning level {args.reasoning!r}. Valid levels: {valid_levels}.\n"
+        )
+        return ExitCode.FAILURE
     if args.list_schemas:
         sys.stdout.write("\n".join(sorted(SCHEMAS)) + "\n")
         return ExitCode.OK
@@ -127,8 +149,13 @@ def main(
     document = load_source_document(args.input, stdin)
     if not isinstance(document, str):
         return _report_intake(document)
+    settings = PortSettings(
+        model_id=args.model,
+        reasoning=reasoning,
+        debug=sys.stderr if args.debug else None,
+    )
     try:
-        extract = port_factory(args.model, sys.stderr if args.debug else None)
+        extract = port_factory(settings)
         outcome = extract(document, schema)
     except ConfigurationError as error:
         sys.stderr.write(f"Configuration error: {error}\n")

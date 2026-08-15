@@ -1,8 +1,9 @@
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
-from typing import Protocol, TextIO, TypedDict, cast
+from typing import Literal, Protocol, TextIO, TypedDict, cast
 
 from langchain_core.messages import BaseMessage
 from langchain_core.prompts import ChatPromptTemplate
@@ -10,6 +11,27 @@ from langchain_openai import ChatOpenAI
 from langchain_openai.chat_models.base import OpenAIRefusalError
 from openai import APIError, BadRequestError, NotFoundError, UnprocessableEntityError
 from pydantic import BaseModel
+
+
+class ReasoningLevel(StrEnum):
+    """Provider-neutral reasoning effort exposed by the command line."""
+
+    OFF = "off"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+REASONING_LEVELS = {level.value: level for level in ReasoningLevel}
+
+
+@dataclass(frozen=True, slots=True)
+class PortSettings:
+    """Everything a provider adapter needs to construct an extraction port."""
+
+    model_id: str
+    reasoning: ReasoningLevel
+    debug: TextIO | None
 
 
 class ConfigurationError(Exception):
@@ -84,7 +106,7 @@ class ExtractionPort(Protocol):
     def __call__(self, document: str, schema: type[BaseModel]) -> Extraction: ...
 
 
-type PortFactory = Callable[[str, TextIO | None], ExtractionPort]
+type PortFactory = Callable[[PortSettings], ExtractionPort]
 
 
 def _load_env_file(path: Path) -> None:
@@ -114,14 +136,24 @@ def _load_env_file(path: Path) -> None:
         os.environ.setdefault(key.strip(), value)
 
 
-def build_openai_port(model_id: str, debug: TextIO | None) -> ExtractionPort:
+type _OpenAIReasoningEffort = Literal["none", "low", "medium", "high"]
+
+_OPENAI_REASONING: dict[ReasoningLevel, _OpenAIReasoningEffort] = {
+    ReasoningLevel.OFF: "none",
+    ReasoningLevel.LOW: "low",
+    ReasoningLevel.MEDIUM: "medium",
+    ReasoningLevel.HIGH: "high",
+}
+
+
+def build_openai_port(settings: PortSettings) -> ExtractionPort:
     """Build the OpenAI-backed extraction port, or fail if it cannot be configured."""
     _load_env_file(Path(__file__).resolve().parents[2] / ".env")
     if not os.getenv("OPENAI_API_KEY"):
         raise ConfigurationError("missing OPENAI_API_KEY; set it in extractor/.env")
     model = ChatOpenAI(
-        model=model_id,
-        reasoning_effort="none",
+        model=settings.model_id,
+        reasoning_effort=_OPENAI_REASONING[settings.reasoning],
         temperature=0,
         timeout=60,
         max_retries=2,
@@ -153,8 +185,8 @@ def build_openai_port(model_id: str, debug: TextIO | None) -> ExtractionPort:
             return ProviderRejectedRequest(detail=str(error))
         except APIError as error:
             return ProviderFailure(detail=str(error))
-        if debug is not None:
-            debug.write(f"Raw model message: {result['raw']!r}\n")
+        if settings.debug is not None:
+            settings.debug.write(f"Raw model message: {result['raw']!r}\n")
         parsing_error = result["parsing_error"]
         if isinstance(parsing_error, OpenAIRefusalError):
             return Refusal(detail=str(parsing_error))
@@ -166,3 +198,7 @@ def build_openai_port(model_id: str, debug: TextIO | None) -> ExtractionPort:
         return Extracted(value=parsed)
 
     return extract
+
+
+PROVIDERS: dict[str, PortFactory] = {"openai": build_openai_port}
+DEFAULT_PROVIDER = next(iter(PROVIDERS))

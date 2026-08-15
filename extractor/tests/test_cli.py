@@ -3,20 +3,24 @@ import sys
 from collections.abc import Sequence
 from io import StringIO
 from pathlib import Path
-from typing import NamedTuple, TextIO
+from typing import NamedTuple
 
 import pytest
 from pydantic import BaseModel, ValidationError
 
 from extractor.__main__ import DEFAULT_MODEL, ExitCode, main
 from extractor.extraction import (
+    DEFAULT_PROVIDER,
+    REASONING_LEVELS,
     EmptyExtraction,
     Extracted,
     Extraction,
     ExtractionPort,
     PortFactory,
+    PortSettings,
     ProviderFailure,
     ProviderRejectedRequest,
+    ReasoningLevel,
     Refusal,
     ValidationFailure,
     build_openai_port,
@@ -35,13 +39,11 @@ class StagedPort:
 
     def __init__(self, outcome: Extraction) -> None:
         self.outcome = outcome
-        self.debug: TextIO | None = None
         self.documents: list[str] = []
-        self.model_ids: list[str] = []
+        self.settings: list[PortSettings] = []
 
-    def __call__(self, model_id: str, debug: TextIO | None) -> ExtractionPort:
-        self.model_ids.append(model_id)
-        self.debug = debug
+    def __call__(self, settings: PortSettings) -> ExtractionPort:
+        self.settings.append(settings)
 
         def extract(document: str, schema: type[BaseModel]) -> Extraction:
             self.documents.append(document)
@@ -57,7 +59,7 @@ class PortCalled(BaseException):
 def failing_port(error: BaseException) -> PortFactory:
     """A port factory whose port always raises `error`."""
 
-    def factory(model_id: str, debug: TextIO | None) -> ExtractionPort:
+    def factory(_settings: PortSettings) -> ExtractionPort:
         def extract(document: str, schema: type[BaseModel]) -> Extraction:
             raise error
 
@@ -66,7 +68,7 @@ def failing_port(error: BaseException) -> PortFactory:
     return factory
 
 
-def tripwire_port(model_id: str, debug: TextIO | None) -> ExtractionPort:
+def tripwire_port(_settings: PortSettings) -> ExtractionPort:
     """A tripwire: reaching the provider at all — even constructing it — is the bug under test."""
     raise PortCalled("the extraction port must not be constructed")
 
@@ -87,7 +89,11 @@ def run_cli(
     source: str = "",
     port_factory: PortFactory = tripwire_port,
 ) -> CliResult:
-    exit_code = main(argv, stdin=StringIO(source), port_factory=port_factory)
+    exit_code = main(
+        argv,
+        stdin=StringIO(source),
+        providers={DEFAULT_PROVIDER: port_factory},
+    )
     captured = capsys.readouterr()
     return CliResult(exit_code, captured.out, captured.err)
 
@@ -115,7 +121,7 @@ def test_a_valid_extraction_is_the_only_stdout_and_exits_zero(
 
     assert result == CliResult(ExitCode.OK, json.dumps(expected, separators=(",", ":")) + "\n", "")
     assert staged.documents == ["Terms of Service source"]
-    assert staged.debug is None
+    assert staged.settings == [PortSettings(DEFAULT_MODEL, ReasoningLevel.MEDIUM, None)]
 
 
 def test_an_invalid_model_value_is_a_validation_failure(
@@ -247,7 +253,7 @@ def test_debug_directs_the_raw_message_dump_to_stderr(
     assert result.exit_code == ExitCode.OK
     assert json.loads(result.stdout) == extracted
     # `main` owns only the wiring; `test_extraction.py` covers what the adapter writes there.
-    assert staged.debug is sys.stderr
+    assert staged.settings[-1].debug is sys.stderr
 
 
 def test_a_source_file_is_read_for_extraction(capsys: pytest.CaptureFixture[str]) -> None:
@@ -368,7 +374,7 @@ def test_the_default_model_is_the_cheap_tier(capsys: pytest.CaptureFixture[str])
 
     run_cli(capsys, ["--schema", "tos", "-"], source="source", port_factory=staged)
 
-    assert staged.model_ids == [DEFAULT_MODEL]
+    assert staged.settings[-1].model_id == DEFAULT_MODEL
 
 
 def test_the_model_flag_overrides_the_default(capsys: pytest.CaptureFixture[str]) -> None:
@@ -383,4 +389,94 @@ def test_the_model_flag_overrides_the_default(capsys: pytest.CaptureFixture[str]
         port_factory=staged,
     )
 
-    assert staged.model_ids == ["gpt-5"]
+    assert staged.settings[-1].model_id == "gpt-5"
+
+
+def test_an_explicit_openai_provider_matches_the_default(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    implicit = StagedPort(EmptyExtraction())
+    explicit = StagedPort(EmptyExtraction())
+
+    implicit_result = run_cli(
+        capsys, ["--schema", "tos", "-"], source="source", port_factory=implicit
+    )
+    explicit_result = run_cli(
+        capsys,
+        ["--provider", DEFAULT_PROVIDER, "--schema", "tos", "-"],
+        source="source",
+        port_factory=explicit,
+    )
+
+    assert explicit_result == implicit_result
+    assert explicit.settings == implicit.settings
+
+
+def test_an_unknown_provider_lists_valid_names_without_constructing_a_port(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = run_cli(
+        capsys,
+        ["--provider", "unknown", "--schema", "tos", "-"],
+        source="source",
+        port_factory=tripwire_port,
+    )
+
+    assert result.exit_code is ExitCode.FAILURE
+    assert result.stdout == ""
+    assert "valid providers" in result.stderr.lower()
+    assert DEFAULT_PROVIDER in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("argument", "expected"),
+    [(name, level) for name, level in REASONING_LEVELS.items()],
+)
+def test_each_reasoning_level_reaches_the_port_settings(
+    capsys: pytest.CaptureFixture[str],
+    argument: str,
+    expected: ReasoningLevel,
+) -> None:
+    staged = StagedPort(EmptyExtraction())
+
+    run_cli(
+        capsys,
+        ["--reasoning", argument, "--schema", "tos", "-"],
+        source="source",
+        port_factory=staged,
+    )
+
+    assert staged.settings[-1].reasoning is expected
+
+
+def test_an_unknown_reasoning_level_lists_valid_values_without_constructing_a_port(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = run_cli(
+        capsys,
+        ["--reasoning", "extreme", "--schema", "tos", "-"],
+        source="source",
+        port_factory=tripwire_port,
+    )
+
+    assert result.exit_code is ExitCode.FAILURE
+    assert result.stdout == ""
+    assert "valid levels" in result.stderr.lower()
+    assert all(level in result.stderr for level in REASONING_LEVELS)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--unknown-flag"],
+        ["--schema"],
+    ],
+)
+def test_a_bad_invocation_uses_the_generic_failure_status(
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+) -> None:
+    result = run_cli(capsys, argv, port_factory=tripwire_port)
+
+    assert result.exit_code is ExitCode.FAILURE
+    assert result.stdout == ""
