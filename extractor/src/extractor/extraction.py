@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Literal, Protocol, TextIO, TypedDict, cast
+from typing import Any, Literal, Protocol, TextIO, TypedDict, assert_never, cast
 
 from anthropic import APIError as AnthropicAPIError
 from anthropic import BadRequestError as AnthropicBadRequestError
@@ -224,44 +224,70 @@ def _through_anthropic(chain: _StructuredChain, document: str, debug: TextIO | N
     return _classify(result, debug, _anthropic_refusal)
 
 
-type _OpenAIReasoningEffort = Literal["none", "low", "medium", "high"]
+type _Effort = Literal["none", "low", "medium", "high"]
 
-_OPENAI_REASONING: dict[ReasoningLevel, _OpenAIReasoningEffort] = {
-    ReasoningLevel.OFF: "none",
-    ReasoningLevel.LOW: "low",
-    ReasoningLevel.MEDIUM: "medium",
-    ReasoningLevel.HIGH: "high",
-}
 
-type _AnthropicReasoningEffort = Literal["low", "medium", "high"]
+def _openai_family_effort(level: ReasoningLevel) -> _Effort:
+    """The OpenAI-format spelling: `off` is an effort of `none`, and the rest carry over.
 
-# Anthropic spells "off" as a disabled thinking configuration and sets no effort at all: an
-# effort re-enables adaptive thinking, so the two are mutually exclusive. The named levels set
-# an effort and leave `thinking` unset, which is what turns adaptive thinking on.
-_ANTHROPIC_REASONING: dict[
-    ReasoningLevel, tuple[dict[str, str] | None, _AnthropicReasoningEffort | None]
-] = {
-    ReasoningLevel.OFF: ({"type": "disabled"}, None),
-    ReasoningLevel.LOW: (None, "low"),
-    ReasoningLevel.MEDIUM: (None, "medium"),
-    ReasoningLevel.HIGH: (None, "high"),
-}
+    Shared with the aggregator, which uses the same four words — but not the same channel, so
+    only the vocabulary is common. A `match` rather than a table: a fifth reasoning level then
+    fails type checking here instead of raising a `KeyError` at the first run that selects it.
+    """
+    match level:
+        case ReasoningLevel.OFF:
+            return "none"
+        case ReasoningLevel.LOW:
+            return "low"
+        case ReasoningLevel.MEDIUM:
+            return "medium"
+        case ReasoningLevel.HIGH:
+            return "high"
+        case unreachable:
+            assert_never(unreachable)
 
-type _OpenRouterReasoningEffort = Literal["none", "low", "medium", "high"]
 
-# The aggregator's own spelling: an effort inside a `reasoning` object, not a flattened field.
-# Reasoning is a cost lever and enforcement is the correctness contract, but on this provider the
-# lever is not free of the contract: the routing guard requires every parameter sent to be
-# honoured, so `reasoning` narrows endpoint selection too. Against a model that does not advertise
-# reasoning, `--provider openrouter` therefore reports a rejected request rather than quietly
-# ignoring the level. The guard cannot be scoped to one parameter, and losing enforcement is the
-# worse trade, so this is accepted and recorded rather than worked around.
-_OPENROUTER_REASONING: dict[ReasoningLevel, _OpenRouterReasoningEffort] = {
-    ReasoningLevel.OFF: "none",
-    ReasoningLevel.LOW: "low",
-    ReasoningLevel.MEDIUM: "medium",
-    ReasoningLevel.HIGH: "high",
-}
+@dataclass(frozen=True, slots=True)
+class _AnthropicReasoning:
+    """Anthropic's two reasoning controls, which are mutually exclusive.
+
+    Named fields rather than a pair, so the adapter cannot silently transpose them.
+    """
+
+    thinking: dict[str, str] | None
+    effort: Literal["low", "medium", "high"] | None
+
+
+def _anthropic_reasoning(level: ReasoningLevel) -> _AnthropicReasoning:
+    """`off` is a disabled thinking configuration and no effort at all.
+
+    An effort re-enables adaptive thinking, so the two controls cannot both be set. The named
+    levels set an effort and leave `thinking` unset, which is what turns adaptive thinking on.
+    """
+    match level:
+        case ReasoningLevel.OFF:
+            return _AnthropicReasoning(thinking={"type": "disabled"}, effort=None)
+        case ReasoningLevel.LOW:
+            return _AnthropicReasoning(thinking=None, effort="low")
+        case ReasoningLevel.MEDIUM:
+            return _AnthropicReasoning(thinking=None, effort="medium")
+        case ReasoningLevel.HIGH:
+            return _AnthropicReasoning(thinking=None, effort="high")
+        case unreachable:
+            assert_never(unreachable)
+
+
+def _openrouter_reasoning(level: ReasoningLevel) -> dict[str, _Effort]:
+    """The aggregator's own channel: an effort inside a `reasoning` object, not a flat field.
+
+    Reasoning is a cost lever and enforcement is the correctness contract, but on this provider
+    the lever is not free of the contract: the routing guard requires every parameter sent to be
+    honoured, so `reasoning` narrows endpoint selection too. Against a model that does not
+    advertise reasoning, `--provider openrouter` therefore reports a rejected request rather than
+    quietly ignoring the level. The guard cannot be scoped to one parameter, and losing
+    enforcement is the worse trade, so this is accepted and recorded rather than worked around.
+    """
+    return {"effort": _openai_family_effort(level)}
 
 
 def _openai_family_port(model: ChatOpenAI, debug: TextIO | None) -> ExtractionPort:
@@ -290,7 +316,7 @@ def build_openai_port(settings: PortSettings) -> ExtractionPort:
     return _openai_family_port(
         ChatOpenAI(
             model=settings.model_id,
-            reasoning_effort=_OPENAI_REASONING[settings.reasoning],
+            reasoning_effort=_openai_family_effort(settings.reasoning),
             temperature=0,
             timeout=_REQUEST_TIMEOUT_SECONDS,
             max_retries=_MAX_RETRIES,
@@ -307,11 +333,11 @@ def build_anthropic_port(settings: PortSettings) -> ExtractionPort:
     run instead of buying repeatability.
     """
     required_key("ANTHROPIC_API_KEY")
-    thinking, effort = _ANTHROPIC_REASONING[settings.reasoning]
+    reasoning = _anthropic_reasoning(settings.reasoning)
     model = ChatAnthropic(
         model=settings.model_id,
-        thinking=thinking,
-        reasoning_effort=effort,
+        thinking=reasoning.thinking,
+        reasoning_effort=reasoning.effort,
         timeout=_REQUEST_TIMEOUT_SECONDS,
         max_retries=_MAX_RETRIES,
     )
@@ -355,7 +381,7 @@ def build_openrouter_port(settings: PortSettings) -> ExtractionPort:
             use_responses_api=False,
             extra_body={
                 "provider": _ROUTING_GUARD,
-                "reasoning": {"effort": _OPENROUTER_REASONING[settings.reasoning]},
+                "reasoning": _openrouter_reasoning(settings.reasoning),
             },
             timeout=_REQUEST_TIMEOUT_SECONDS,
             max_retries=_MAX_RETRIES,
