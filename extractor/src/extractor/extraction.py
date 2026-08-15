@@ -292,8 +292,12 @@ _ANTHROPIC_REASONING: dict[
 type _OpenRouterReasoningEffort = Literal["none", "low", "medium", "high"]
 
 # The aggregator's own spelling: an effort inside a `reasoning` object, not a flattened field.
-# Reasoning does not fail closed — an aggregated model without reasoning support ignores this
-# silently, which is accepted, because reasoning is a cost lever and enforcement is the contract.
+# Reasoning is a cost lever and enforcement is the correctness contract, but on this provider the
+# lever is not free of the contract: the routing guard requires every parameter sent to be
+# honoured, so `reasoning` narrows endpoint selection too. Against a model that does not advertise
+# reasoning, `--provider openrouter` therefore reports a rejected request rather than quietly
+# ignoring the level. The guard cannot be scoped to one parameter, and losing enforcement is the
+# worse trade, so this is accepted and recorded rather than worked around.
 _OPENROUTER_REASONING: dict[ReasoningLevel, _OpenRouterReasoningEffort] = {
     ReasoningLevel.OFF: "none",
     ReasoningLevel.LOW: "low",
@@ -302,16 +306,13 @@ _OPENROUTER_REASONING: dict[ReasoningLevel, _OpenRouterReasoningEffort] = {
 }
 
 
-def build_openai_port(settings: PortSettings) -> ExtractionPort:
-    """Build the OpenAI-backed extraction port, or fail if it cannot be configured."""
-    _required_key("OPENAI_API_KEY")
-    model = ChatOpenAI(
-        model=settings.model_id,
-        reasoning_effort=_OPENAI_REASONING[settings.reasoning],
-        temperature=0,
-        timeout=_REQUEST_TIMEOUT_SECONDS,
-        max_retries=_MAX_RETRIES,
-    )
+def _openai_family_port(model: ChatOpenAI, debug: TextIO | None) -> ExtractionPort:
+    """The extraction port OpenAI and OpenRouter share: strict json schema, one funnel.
+
+    Only the model construction differs between those two providers. Everything after it —
+    the binding arguments, the prompt, and the exception mapping — is one integration's
+    behaviour and belongs in one place.
+    """
 
     def extract(document: str, schema: type[BaseModel]) -> Extraction:
         structured_model = model.with_structured_output(
@@ -320,9 +321,24 @@ def build_openai_port(settings: PortSettings) -> ExtractionPort:
             strict=True,
             include_raw=True,
         )
-        return _through_openai_family(_PROMPT | structured_model, document, settings.debug)
+        return _through_openai_family(_PROMPT | structured_model, document, debug)
 
     return extract
+
+
+def build_openai_port(settings: PortSettings) -> ExtractionPort:
+    """Build the OpenAI-backed extraction port, or fail if it cannot be configured."""
+    _required_key("OPENAI_API_KEY")
+    return _openai_family_port(
+        ChatOpenAI(
+            model=settings.model_id,
+            reasoning_effort=_OPENAI_REASONING[settings.reasoning],
+            temperature=0,
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+            max_retries=_MAX_RETRIES,
+        ),
+        settings.debug,
+    )
 
 
 def build_anthropic_port(settings: PortSettings) -> ExtractionPort:
@@ -373,29 +389,21 @@ def build_openrouter_port(settings: PortSettings) -> ExtractionPort:
     would leave the aggregator with no endpoint able to enforce the schema.
     """
     key = _required_key("OPENROUTER_API_KEY")
-    model = ChatOpenAI(
-        model=settings.model_id,
-        base_url=_OPENROUTER_BASE_URL,
-        api_key=SecretStr(key),
-        use_responses_api=False,
-        extra_body={
-            "provider": _ROUTING_GUARD,
-            "reasoning": {"effort": _OPENROUTER_REASONING[settings.reasoning]},
-        },
-        timeout=_REQUEST_TIMEOUT_SECONDS,
-        max_retries=_MAX_RETRIES,
+    return _openai_family_port(
+        ChatOpenAI(
+            model=settings.model_id,
+            base_url=_OPENROUTER_BASE_URL,
+            api_key=SecretStr(key),
+            use_responses_api=False,
+            extra_body={
+                "provider": _ROUTING_GUARD,
+                "reasoning": {"effort": _OPENROUTER_REASONING[settings.reasoning]},
+            },
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+            max_retries=_MAX_RETRIES,
+        ),
+        settings.debug,
     )
-
-    def extract(document: str, schema: type[BaseModel]) -> Extraction:
-        structured_model = model.with_structured_output(
-            schema,
-            method="json_schema",
-            strict=True,
-            include_raw=True,
-        )
-        return _through_openai_family(_PROMPT | structured_model, document, settings.debug)
-
-    return extract
 
 
 @dataclass(frozen=True, slots=True)

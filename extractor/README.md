@@ -88,8 +88,15 @@ every run.
 
 `--reasoning` takes the same four words everywhere, but the level is nominal: `medium` on OpenAI
 and `medium` on a Claude-backed aggregator endpoint are not the same quantity, because the
-aggregator turns an effort into a proportional token budget. Enforcement fails closed; reasoning
-does not — an aggregated model with no reasoning support ignores the setting silently.
+aggregator turns an effort into a proportional token budget. On `openrouter` the reasoning setting
+is also covered by the routing guard, which requires every parameter sent to be honoured — so a
+`--model` that does not advertise reasoning is reported as a rejected request rather than having
+the level quietly ignored. The guard cannot be scoped to one parameter, and losing schema
+enforcement is the worse trade.
+
+Only `openai` pins temperature to 0. Anthropic rejects a modified temperature while thinking is
+on, and under the routing guard temperature is another parameter the default aggregator endpoint
+does not advertise, so neither of the other two sends one.
 
 Refusal reporting is asymmetric, so read silence as unknown rather than as consent. OpenAI
 reports a refusal, either raised or on the raw message. Anthropic reports it as a stop reason on

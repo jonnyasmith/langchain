@@ -112,9 +112,11 @@ structured-output binding, debug dumps, both exception-to-outcome funnels, and t
 dataclasses. It also declares `ExtractionPort` because the union lives here. It does not own exit
 codes or any output formatting other than adapter debug dumps.
 
-The three adapters share the prompt, the envelope classification, and — for OpenAI and
-OpenRouter — one exception funnel. What differs per provider is the model construction, the
-reasoning spelling, the binding arguments, and where a refusal is read from.
+The three adapters share the prompt and the envelope classification. OpenAI and OpenRouter share
+more than that: `_openai_family_port` builds the whole port for both — the strict json-schema
+binding and the exception funnel — so those two adapters differ only in how they construct
+`ChatOpenAI`. What differs per provider is that model construction, the reasoning spelling, the
+binding arguments, and where a refusal is read from.
 
 The seam between the CLI and providers is `PortFactory = Callable[[PortSettings],
 ExtractionPort]`, reached through `Provider.build_port`. `PortSettings` carries the model id,
@@ -264,6 +266,15 @@ no scheduler, and no monitoring. The operator's tools are the exit code, the std
 Run from `extractor/`: `uv run ruff format .`, `uv run ruff check .`, `uv run mypy`, `uv run
 pytest`. There is no task runner and the module forbids adding one.
 
+`pyproject.toml` enables the `pydantic.mypy` plugin. It is not optional hygiene: `ChatAnthropic`
+declares its model id, reasoning effort, and timeout behind field aliases, and without the plugin
+`mypy --strict` rejects the constructor call the Anthropic adapter has to make.
+
+Runtime dependencies for providers are `langchain-openai`, `langchain-anthropic`, `openai`, and
+`anthropic`. OpenRouter adds none — it reuses the OpenAI integration. Each SDK is declared
+directly rather than relied on transitively, because `extraction.py` imports the exception
+classes of both by name.
+
 - `tests/test_schemas.py` proves every field is described and is required-and-nullable, by
   reading the generated JSON schema. This is the only check on invariant 5.
 - `tests/test_intake.py` covers stdin, UTF-8 files, missing and unreadable paths, undecodable
@@ -296,8 +307,12 @@ only mechanism.
 - One schema ships (`tos`). The registry is closed to user-supplied schemas.
 - Three providers are registered and the set is closed. The registry and frozen settings seam
   make a fourth enforcing adapter a bounded addition without changing the CLI or extraction port.
-- Reasoning does not fail closed the way enforcement does: an aggregated model with no reasoning
-  support ignores the setting silently.
+- Reasoning is a cost lever, not a correctness contract, so a provider that ignores it is
+  accepted — except on OpenRouter, where the routing guard makes the reasoning field its own
+  routing constraint, so a `--model` that does not advertise reasoning is reported as a rejected
+  request. The guard cannot be scoped to one parameter.
+- Only `openai` pins temperature. Anthropic rejects a modified temperature while thinking is on,
+  and under the routing guard temperature is another unadvertised parameter.
 - A refusal is only reported where the provider reports one, and through OpenRouter that is not
   guaranteed. See ADR-0004.
 - No prompt-injection defence, as described in section 7.
@@ -315,7 +330,7 @@ only mechanism.
 | `src/extractor/extraction.py` | The `Extraction` union, `ExtractionPort`, `PortFactory`, `Provider`, `PROVIDERS`, the three `build_*_port` adapters, all provider vocabulary |
 | `src/extractor/intake.py` | `load_source_document`, the `Intake` and `IntakeFailure` unions, `MAX_DOCUMENT_CHARACTERS` |
 | `src/extractor/schemas.py` | `TermsOfService`, the `SCHEMAS` registry |
-| `pyproject.toml` | Dependencies, dev group, ruff, mypy strict, pytest markers and default deselection |
+| `pyproject.toml` | Dependencies, dev group, ruff, mypy strict plus the `pydantic.mypy` plugin, pytest markers and default deselection |
 | `AGENTS.md` | Verification commands and module-level prohibitions |
 | `CODING_STANDARDS.md` | The rules every change must hold, and the rejected alternatives |
 | `docs/agents/domain.md` | Vocabulary: outcome, port, absent field, intake |

@@ -1,6 +1,7 @@
 """Offline adapter tests, all through the substituted chat-model seam.
 
-No test here reaches the network. Each adapter's provider chat-model class is replaced by a
+No test here reaches a provider or the network; the one test that needs a real HTTP request
+binds a loopback server of its own. Each adapter's provider chat-model class is replaced by a
 recording builder that returns a canned real subclass, because the structured-output parsing
 that decides an outcome runs inside the provider package and only runs on a real subclass.
 
@@ -204,11 +205,18 @@ def anthropic_message(facts: dict[str, object]) -> AIMessage:
     return AIMessage(content=json.dumps(facts))
 
 
-def status_error(kind: type[Any], message: str, status: int) -> Any:
-    """Build one SDK's status error with the HTTP flavour that SDK actually carries."""
-    library = httpx if kind.__module__.startswith("anthropic") else httpx2
-    request = library.Request("POST", "https://provider.test")
-    return kind(message, response=library.Response(status, request=request), body=None)
+def openai_error(kind: type[APIStatusError], message: str, status: int) -> APIStatusError:
+    """Build an `openai` status error, which carries `httpx2`."""
+    request = httpx2.Request("POST", "https://provider.test")
+    return kind(message, response=httpx2.Response(status, request=request), body=None)
+
+
+def anthropic_error(
+    kind: type[anthropic.APIStatusError], message: str, status: int
+) -> anthropic.APIStatusError:
+    """Build an `anthropic` status error, which carries `httpx`."""
+    request = httpx.Request("POST", "https://provider.test")
+    return kind(message, response=httpx.Response(status, request=request), body=None)
 
 
 def test_a_parsed_object_is_an_extracted_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -478,18 +486,17 @@ def test_the_openrouter_model_is_configured_for_the_aggregator_and_nothing_else(
 
 
 @pytest.mark.parametrize(
-    ("build", "key", "model_id"),
+    ("build", "key"),
     [
-        (build_openai_port, "OPENAI_API_KEY", "gpt-5-nano"),
-        (build_anthropic_port, "ANTHROPIC_API_KEY", "claude-sonnet-5"),
-        (build_openrouter_port, "OPENROUTER_API_KEY", "openai/gpt-5-nano"),
+        (build_openai_port, "OPENAI_API_KEY"),
+        (build_anthropic_port, "ANTHROPIC_API_KEY"),
+        (build_openrouter_port, "OPENROUTER_API_KEY"),
     ],
 )
 def test_each_adapter_checks_only_its_own_key_before_building_the_model(
     monkeypatch: pytest.MonkeyPatch,
     build: PortFactory,
     key: str,
-    model_id: str,
 ) -> None:
     """Every other provider's key is present and does not help, and the message names both the
     missing key and where to put it. Nothing is constructed, so a misconfigured run is free."""
@@ -502,24 +509,23 @@ def test_each_adapter_checks_only_its_own_key_before_building_the_model(
         monkeypatch.setattr(f"extractor.extraction.{target}", lambda **_: built.append("built"))
 
     with pytest.raises(ConfigurationError, match=rf"{key}.*extractor/\.env"):
-        build(PortSettings(model_id, ReasoningLevel.MEDIUM, None))
+        build(PortSettings("any-model", ReasoningLevel.MEDIUM, None))
 
     assert built == []
 
 
 @pytest.mark.parametrize(
-    ("build", "key", "model_id"),
+    ("build", "key"),
     [
-        (build_openai_port, "OPENAI_API_KEY", "gpt-5-nano"),
-        (build_anthropic_port, "ANTHROPIC_API_KEY", "claude-sonnet-5"),
-        (build_openrouter_port, "OPENROUTER_API_KEY", "openai/gpt-5-nano"),
+        (build_openai_port, "OPENAI_API_KEY"),
+        (build_anthropic_port, "ANTHROPIC_API_KEY"),
+        (build_openrouter_port, "OPENROUTER_API_KEY"),
     ],
 )
 def test_each_adapter_reads_its_key_from_the_app_local_dotenv(
     monkeypatch: pytest.MonkeyPatch,
     build: PortFactory,
     key: str,
-    model_id: str,
 ) -> None:
     """`extractor/.env`, so no key has to be exported into every shell."""
     monkeypatch.setenv(key, "test-key")
@@ -528,7 +534,7 @@ def test_each_adapter_reads_its_key_from_the_app_local_dotenv(
     loaded: list[Path] = []
     monkeypatch.setattr("extractor.extraction._load_env_file", loaded.append)
 
-    build(PortSettings(model_id, ReasoningLevel.MEDIUM, None))
+    build(PortSettings("any-model", ReasoningLevel.MEDIUM, None))
 
     assert loaded == [Path(__file__).resolve().parents[1] / ".env"]
 
@@ -690,9 +696,9 @@ def test_the_routing_guard_and_reasoning_arrive_as_top_level_request_fields(
 @pytest.mark.parametrize(
     "error",
     [
-        status_error(BadRequestError, "bad request", 400),
-        status_error(NotFoundError, "not found", 404),
-        status_error(UnprocessableEntityError, "unprocessable", 422),
+        openai_error(BadRequestError, "bad request", 400),
+        openai_error(NotFoundError, "not found", 404),
+        openai_error(UnprocessableEntityError, "unprocessable", 422),
     ],
 )
 def test_each_rejected_request_class_becomes_a_provider_rejected_request(
@@ -707,9 +713,9 @@ def test_each_rejected_request_class_becomes_a_provider_rejected_request(
 @pytest.mark.parametrize(
     "error",
     [
-        status_error(anthropic.BadRequestError, "bad request", 400),
-        status_error(anthropic.NotFoundError, "not found", 404),
-        status_error(anthropic.UnprocessableEntityError, "unprocessable", 422),
+        anthropic_error(anthropic.BadRequestError, "bad request", 400),
+        anthropic_error(anthropic.NotFoundError, "not found", 404),
+        anthropic_error(anthropic.UnprocessableEntityError, "unprocessable", 422),
     ],
 )
 def test_each_anthropic_rejected_request_class_becomes_a_provider_rejected_request(
@@ -754,7 +760,7 @@ def test_exhausted_aggregator_credit_becomes_a_provider_failure(
 ) -> None:
     """It has no named subclass, so it falls through to the base class — which is right, since
     re-running after topping up succeeds."""
-    credit_exhausted = status_error(APIStatusError, "insufficient credits", 402)
+    credit_exhausted = openai_error(APIStatusError, "insufficient credits", 402)
 
     outcome = extract_through_openrouter(monkeypatch, credit_exhausted)
 
@@ -764,11 +770,11 @@ def test_exhausted_aggregator_credit_becomes_a_provider_failure(
 @pytest.mark.parametrize(
     ("extract", "error"),
     [
-        (extract_through_openai, status_error(NotFoundError, "model does not exist", 404)),
-        (extract_through_openrouter, status_error(NotFoundError, "model does not exist", 404)),
+        (extract_through_openai, openai_error(NotFoundError, "model does not exist", 404)),
+        (extract_through_openrouter, openai_error(NotFoundError, "model does not exist", 404)),
         (
             extract_through_anthropic,
-            status_error(anthropic.NotFoundError, "model does not exist", 404),
+            anthropic_error(anthropic.NotFoundError, "model does not exist", 404),
         ),
     ],
 )

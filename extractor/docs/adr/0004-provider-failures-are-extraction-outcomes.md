@@ -32,6 +32,8 @@ Provider failures exit 5 and provider-rejected requests exit 6. Existing exit co
 
 Every adapter explicitly configures a 60-second request timeout and two SDK retries, spelled with the field name its own integration declares. A surfaced rate limit has therefore already exhausted the configured retries, while one document cannot inherit an SDK's ten-minute default.
 
+Both integrations take that timeout in **seconds**, and the value is passed through unconverted: `langchain_openai` declares `request_timeout: float` aliased `timeout`, `langchain_anthropic` declares `default_request_timeout: float | None` aliased `timeout`, and each hands its value straight to its HTTP client. This is recorded because the originating specification asserted that one of them takes milliseconds; that was checked against the installed packages and is not true. Do not add a factor of a thousand.
+
 A paid live test skips loudly after exit 5 because the enforced-schema contract went unchecked through no fault of the code. It does not skip after exit 6: provider rejection is evidence that the request or the schema binding is invalid, which is what those tests exist to detect. The key-presence check remains an offline construction check, asks only about the provider under test, and makes no separate provider probe.
 
 Both exception funnels are exercised offline through the substituted chat-model seam. The tests
