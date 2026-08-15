@@ -4,9 +4,10 @@
 
 ### This context
 
-- How this module is written, and the idioms it rejects → CODING_STANDARDS.md
 - Extractor vocabulary → docs/agents/domain.md
 - Extractor decisions → docs/adr/
+- Extractor architecture → docs/ARCHITECTURE.md
+- Extractor coding standards → docs/CODING_STANDARDS.md
 
 ## Verification
 

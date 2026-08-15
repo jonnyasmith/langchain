@@ -70,7 +70,7 @@ def configured_provider() -> None:
     reasons only under `-rs`, so the warning carries the reason into the warnings summary.
     `build_openai_port` owns the definition of "configured", so asking it cannot drift from
     the code this guards. A fixture rather than a module-level `skipif` means the default
-    offline tests never request it, and `load_dotenv` does not write the key into `os.environ`
+    offline tests never request it, and `_load_env_file` does not write the key into `os.environ`
     during collection of a run that never intended to call a provider.
     """
     try:

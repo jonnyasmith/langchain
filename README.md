@@ -12,4 +12,5 @@ A collection of small Python programs, each one a standalone LangChain Core exer
 
 Each directory has its own README. Projects are independent; pick whichever you care about.
 
-Nothing is implemented yet. Code will land in those directories as each project is built.
+`extractor/` is built and runnable. The other four are not implemented yet; code will land in
+those directories as each project is built.

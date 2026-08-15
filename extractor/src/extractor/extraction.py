@@ -2,9 +2,9 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, TextIO, cast
+from typing import Protocol, TextIO, TypedDict, cast
 
-from dotenv import load_dotenv
+from langchain_core.messages import BaseMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from langchain_openai.chat_models.base import OpenAIRefusalError
@@ -66,6 +66,18 @@ type Extraction = (
 )
 
 
+class _RawStructuredOutput(TypedDict):
+    """The envelope `with_structured_output(include_raw=True)` returns.
+
+    `langchain_openai` types that call's result as a plain mapping, so this is the shape
+    the one boundary `cast` asserts. Every key the adapter reads is checked against it.
+    """
+
+    raw: BaseMessage
+    parsed: BaseModel | None
+    parsing_error: BaseException | None
+
+
 class ExtractionPort(Protocol):
     """One extraction attempt: document plus schema in, one named outcome out."""
 
@@ -75,9 +87,36 @@ class ExtractionPort(Protocol):
 type PortFactory = Callable[[str, TextIO | None], ExtractionPort]
 
 
+def _load_env_file(path: Path) -> None:
+    """Define any `KEY=value` the file declares that the environment does not already set.
+
+    Ten lines rather than a dependency, per the coding standards. An exported variable always
+    wins, so a stale file cannot shadow the shell. No interpolation, `export` prefixes, or
+    multi-line values: the extractor reads one key.
+
+    A file that exists but cannot be read is a misconfiguration, not an unexpected state, so
+    it raises `ConfigurationError` rather than leaking an `OSError` into the top-level net.
+    """
+    if not path.is_file():
+        return
+    try:
+        contents = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise ConfigurationError(f"cannot read {path}: {error}") from error
+    for line in contents.splitlines():
+        entry = line.strip()
+        if not entry or entry.startswith("#") or "=" not in entry:
+            continue
+        key, _, value = entry.partition("=")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        os.environ.setdefault(key.strip(), value)
+
+
 def build_openai_port(model_id: str, debug: TextIO | None) -> ExtractionPort:
     """Build the OpenAI-backed extraction port, or fail if it cannot be configured."""
-    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+    _load_env_file(Path(__file__).resolve().parents[2] / ".env")
     if not os.getenv("OPENAI_API_KEY"):
         raise ConfigurationError("missing OPENAI_API_KEY; set it in extractor/.env")
     model = ChatOpenAI(
@@ -107,7 +146,7 @@ def build_openai_port(model_id: str, debug: TextIO | None) -> ExtractionPort:
         )
         chain = prompt | structured_model
         try:
-            result = cast(dict[str, Any], chain.invoke({"document": document}))
+            result = cast(_RawStructuredOutput, chain.invoke({"document": document}))
         except OpenAIRefusalError as error:
             return Refusal(detail=str(error))
         except (BadRequestError, NotFoundError, UnprocessableEntityError) as error:

@@ -1,3 +1,5 @@
+import os
+import re
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,7 @@ from extractor.extraction import (
     Extraction,
     Refusal,
     ValidationFailure,
+    _load_env_file,
     build_openai_port,
 )
 from extractor.schemas import TermsOfService
@@ -187,7 +190,7 @@ def test_a_missing_api_key_fails_before_the_model_is_built(
     provider = StubbedProvider(parsed_message(VALID_FACTS))
     provider.install(monkeypatch)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setattr("extractor.extraction.load_dotenv", lambda _: False)
+    monkeypatch.setattr("extractor.extraction._load_env_file", lambda _: None)
 
     with pytest.raises(ConfigurationError, match="OPENAI_API_KEY"):
         build_openai_port("gpt-5-nano", None)
@@ -230,13 +233,72 @@ def test_the_key_is_read_from_the_app_local_dotenv(monkeypatch: pytest.MonkeyPat
     """`extractor/.env`, so the key does not have to be exported into every shell."""
     StubbedProvider(parsed_message(VALID_FACTS)).install(monkeypatch)
     loaded: list[Path] = []
-
-    def record(path: Path) -> bool:
-        loaded.append(path)
-        return True
-
-    monkeypatch.setattr("extractor.extraction.load_dotenv", record)
+    monkeypatch.setattr("extractor.extraction._load_env_file", loaded.append)
 
     build_openai_port("gpt-5-nano", None)
 
     assert loaded == [Path(__file__).resolve().parents[1] / ".env"]
+
+
+def test_the_env_file_defines_a_key_the_environment_lacks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text('OPENAI_API_KEY="file-key"\n', encoding="utf-8")
+
+    _load_env_file(env_file)
+
+    assert os.environ["OPENAI_API_KEY"] == "file-key"
+
+
+def test_an_exported_key_beats_the_env_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The shell is the operator's override; a stale file must not shadow it."""
+    monkeypatch.setenv("OPENAI_API_KEY", "exported-key")
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENAI_API_KEY=file-key\n", encoding="utf-8")
+
+    _load_env_file(env_file)
+
+    assert os.environ["OPENAI_API_KEY"] == "exported-key"
+
+
+def test_the_env_file_ignores_blank_lines_and_comments(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n# OPENAI_API_KEY=commented-out\n\nOPENAI_API_KEY=file-key\n", encoding="utf-8"
+    )
+
+    _load_env_file(env_file)
+
+    assert os.environ["OPENAI_API_KEY"] == "file-key"
+
+
+def test_a_missing_env_file_is_not_an_error(tmp_path: Path) -> None:
+    """Returning rather than raising is the assertion: a first run has no `.env` and the key
+    may be exported instead, so an absent file must not fail the extractor."""
+    _load_env_file(tmp_path / ".env")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 file regardless")
+def test_an_unreadable_env_file_is_a_configuration_error(tmp_path: Path) -> None:
+    """A present-but-unreadable file is a misconfiguration, not an `Unexpected error`."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENAI_API_KEY=file-key\n", encoding="utf-8")
+    env_file.chmod(0o000)
+
+    with pytest.raises(ConfigurationError, match=re.escape(str(env_file))):
+        _load_env_file(env_file)
+
+
+def test_a_non_utf8_env_file_is_a_configuration_error(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_bytes(b"OPENAI_API_KEY=caf\xe9\n")
+
+    with pytest.raises(ConfigurationError, match=re.escape(str(env_file))):
+        _load_env_file(env_file)
