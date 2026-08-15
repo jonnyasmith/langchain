@@ -2,7 +2,7 @@
 
 > **Status:** Current implementation
 >
-> **Verification basis:** `d8a79e5`
+> **Verification basis:** `ff6b0c3`
 
 ## 1. Executive summary
 
