@@ -20,4 +20,3 @@ Every adapter owns its binding and proves it through the substituted chat-model 
 `ExtractionPort` implementation is allowed, but it must preserve provider-side enforcement and
 the same six extraction outcomes. A provider that can only offer loose JSON output cannot be
 registered.
-MV extractor/docs/adr/0001-provider-adapters-must-enforce-the-schema.md

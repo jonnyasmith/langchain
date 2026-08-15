@@ -16,6 +16,7 @@ from extractor.extraction import (
     PortSettings,
     ProviderFailure,
     ProviderRejectedRequest,
+    ReasoningLevel,
     Refusal,
     ValidationFailure,
 )
@@ -54,8 +55,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--schema", help="named extraction schema")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="provider model id")
     parser.add_argument("--provider", default=DEFAULT_PROVIDER, help="extraction provider")
+    valid_reasoning = ", ".join(REASONING_LEVELS)
     parser.add_argument(
-        "--reasoning", default="medium", help="reasoning effort: off, low, medium, or high"
+        "--reasoning",
+        default=ReasoningLevel.MEDIUM.value,
+        help=f"reasoning effort: {valid_reasoning}",
     )
     parser.add_argument("--list-schemas", action="store_true", help="list named schemas")
     parser.add_argument(
@@ -121,7 +125,9 @@ def main(
 ) -> ExitCode:
     try:
         args = _parser().parse_args(argv)
-    except SystemExit:
+    except SystemExit as request:
+        if request.code == 0:
+            return ExitCode.OK
         return ExitCode.FAILURE
     port_factory = providers.get(args.provider)
     if port_factory is None:

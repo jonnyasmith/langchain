@@ -430,7 +430,12 @@ def test_an_unknown_provider_lists_valid_names_without_constructing_a_port(
 
 @pytest.mark.parametrize(
     ("argument", "expected"),
-    [(name, level) for name, level in REASONING_LEVELS.items()],
+    [
+        ("off", ReasoningLevel.OFF),
+        ("low", ReasoningLevel.LOW),
+        ("medium", ReasoningLevel.MEDIUM),
+        ("high", ReasoningLevel.HIGH),
+    ],
 )
 def test_each_reasoning_level_reaches_the_port_settings(
     capsys: pytest.CaptureFixture[str],
@@ -480,3 +485,13 @@ def test_a_bad_invocation_uses_the_generic_failure_status(
 
     assert result.exit_code is ExitCode.FAILURE
     assert result.stdout == ""
+
+
+def test_help_preserves_argparses_success_status(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = run_cli(capsys, ["--help"], port_factory=tripwire_port)
+
+    assert result.exit_code is ExitCode.OK
+    assert result.stdout.startswith("usage:")
+    assert result.stderr == ""
