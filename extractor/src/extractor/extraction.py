@@ -8,6 +8,7 @@ from anthropic import BadRequestError as AnthropicBadRequestError
 from anthropic import NotFoundError as AnthropicNotFoundError
 from anthropic import UnprocessableEntityError as AnthropicUnprocessableEntityError
 from langchain_anthropic import ChatAnthropic
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import Runnable
@@ -110,11 +111,38 @@ class ExtractionPort(Protocol):
 
 type PortFactory = Callable[[PortSettings], ExtractionPort]
 
+
+class Provider(Protocol):
+    """The seam `main` depends on: a default model, and a port built from settings.
+
+    Declared by the consumer, so the CLI names what it needs rather than importing the registry's
+    concrete record. `ProviderAdapter` satisfies it in production; a test supplies its own.
+    """
+
+    @property
+    def default_model(self) -> str: ...
+
+    def build_port(self, settings: PortSettings) -> ExtractionPort: ...
+
+
 # `Any` in the output position only: `with_structured_output` is typed as returning a plain
 # mapping, and reshaping it is what the funnel's `cast` does. This is the boundary rule 6 allows.
 type _StructuredChain = Runnable[dict[str, str], Any]
 
+# The bound model before the prompt is piped into it. Its input type is the integration's own
+# message union, which nothing here needs to name.
+type _StructuredModel = Runnable[Any, Any]
+
 type _RefusalReader = Callable[[_RawStructuredOutput], str | None]
+
+type SchemaBinder = Callable[[BaseChatModel, type[BaseModel]], _StructuredModel]
+"""Bind a schema through one integration's enforced structured-output path."""
+
+type IntegrationCall = Callable[[_StructuredChain, str, TextIO | None], Extraction]
+"""Invoke one chain and return an outcome. Never raises: this is where exceptions stop."""
+
+type ModelBuilder = Callable[[PortSettings], BaseChatModel]
+"""Construct one provider's chat model, or raise `ConfigurationError` before anything is sent."""
 
 _REQUEST_TIMEOUT_SECONDS = 60
 _MAX_RETRIES = 2
@@ -290,51 +318,64 @@ def _openrouter_reasoning(level: ReasoningLevel) -> dict[str, _Effort]:
     return {"effort": _openai_family_effort(level)}
 
 
-def _openai_family_port(model: ChatOpenAI, debug: TextIO | None) -> ExtractionPort:
-    """The extraction port OpenAI and OpenRouter share: strict json schema, one funnel.
+def _bind_openai_family(model: BaseChatModel, schema: type[BaseModel]) -> _StructuredModel:
+    """ADR-0001: enforcement is provider-side, so these arguments are the contract.
 
-    Only the model construction differs between those two providers. Everything after it —
-    the binding arguments, the prompt, and the exception mapping — is one integration's
-    behaviour and belongs in one place.
+    `strict=False` or a `method` of `function_calling` degrades enforcement to a polite request
+    with no error and no warning.
+    """
+    return model.with_structured_output(schema, method="json_schema", strict=True, include_raw=True)
+
+
+def _bind_anthropic(model: BaseChatModel, schema: type[BaseModel]) -> _StructuredModel:
+    """`json_schema` is the enforcement here; this integration has no `strict` argument.
+
+    `function_calling` must never be used: it forces tool choice, which the provider rejects
+    when thinking is enabled — and thinking is on at every named reasoning level.
+    """
+    return model.with_structured_output(schema, method="json_schema", include_raw=True)
+
+
+@dataclass(frozen=True, slots=True)
+class Integration:
+    """One LangChain chat integration: how it binds a schema, and how its SDK reports failure.
+
+    The two travel together because they come from the same package. Two integrations serve
+    three providers — OpenAI and OpenRouter share this one — and ADR-0004 requires the two
+    exception mappings stay apart, because the SDKs' identically named error classes share no
+    ancestor. Holding each mapping on its own record is what keeps them apart.
     """
 
-    def extract(document: str, schema: type[BaseModel]) -> Extraction:
-        structured_model = model.with_structured_output(
-            schema,
-            method="json_schema",
-            strict=True,
-            include_raw=True,
-        )
-        return _through_openai_family(_PROMPT | structured_model, document, debug)
-
-    return extract
+    bind: SchemaBinder
+    call: IntegrationCall
 
 
-def build_openai_port(settings: PortSettings) -> ExtractionPort:
-    """Build the OpenAI-backed extraction port, or fail if it cannot be configured."""
+OPENAI_FAMILY = Integration(bind=_bind_openai_family, call=_through_openai_family)
+"""Serves every OpenAI-format provider, direct or through an aggregator."""
+
+ANTHROPIC = Integration(bind=_bind_anthropic, call=_through_anthropic)
+"""Serves Anthropic, whose SDK shares no exception ancestor with the OpenAI family's."""
+
+
+def _build_openai_model(settings: PortSettings) -> BaseChatModel:
+    """Temperature is pinned here and nowhere else; the other two providers cannot accept it."""
     required_key("OPENAI_API_KEY")
-    return _openai_family_port(
-        ChatOpenAI(
-            model=settings.model_id,
-            reasoning_effort=_openai_family_effort(settings.reasoning),
-            temperature=0,
-            timeout=_REQUEST_TIMEOUT_SECONDS,
-            max_retries=_MAX_RETRIES,
-        ),
-        settings.debug,
+    return ChatOpenAI(
+        model=settings.model_id,
+        reasoning_effort=_openai_family_effort(settings.reasoning),
+        temperature=0,
+        timeout=_REQUEST_TIMEOUT_SECONDS,
+        max_retries=_MAX_RETRIES,
     )
 
 
-def build_anthropic_port(settings: PortSettings) -> ExtractionPort:
-    """Build the Anthropic-backed extraction port, or fail if it cannot be configured.
-
-    No temperature is set. Anthropic rejects a modified temperature whenever thinking is on,
-    and all three named reasoning levels turn it on, so pinning it would break every default
-    run instead of buying repeatability.
-    """
+def _build_anthropic_model(settings: PortSettings) -> BaseChatModel:
+    """No temperature is set. Anthropic rejects a modified temperature whenever thinking is on,
+    and all three named reasoning levels turn it on, so pinning it would break every default run
+    instead of buying repeatability."""
     required_key("ANTHROPIC_API_KEY")
     reasoning = _anthropic_reasoning(settings.reasoning)
-    model = ChatAnthropic(
+    return ChatAnthropic(
         model=settings.model_id,
         thinking=reasoning.thinking,
         reasoning_effort=reasoning.effort,
@@ -342,24 +383,9 @@ def build_anthropic_port(settings: PortSettings) -> ExtractionPort:
         max_retries=_MAX_RETRIES,
     )
 
-    def extract(document: str, schema: type[BaseModel]) -> Extraction:
-        # `json_schema` is the enforcement here; this integration has no `strict` argument.
-        # `function_calling` must never be used: it forces tool choice, which the provider
-        # rejects when thinking is enabled — and thinking is on at every named level.
-        structured_model = model.with_structured_output(
-            schema,
-            method="json_schema",
-            include_raw=True,
-        )
-        return _through_anthropic(_PROMPT | structured_model, document, settings.debug)
 
-    return extract
-
-
-def build_openrouter_port(settings: PortSettings) -> ExtractionPort:
-    """Build the OpenRouter-backed extraction port, or fail if it cannot be configured.
-
-    The aggregator is reached through the OpenAI-compatible chat model pointed at its base
+def _build_openrouter_model(settings: PortSettings) -> BaseChatModel:
+    """The aggregator is reached through the OpenAI-compatible chat model pointed at its base
     URL, so it adds no dependency and inherits that integration's exception classes.
 
     `extra_body` is load-bearing: the SDK hoists it to the top level of the request, which is
@@ -373,38 +399,59 @@ def build_openrouter_port(settings: PortSettings) -> ExtractionPort:
     would leave the aggregator with no endpoint able to enforce the schema.
     """
     key = required_key("OPENROUTER_API_KEY")
-    return _openai_family_port(
-        ChatOpenAI(
-            model=settings.model_id,
-            base_url=_OPENROUTER_BASE_URL,
-            api_key=SecretStr(key),
-            use_responses_api=False,
-            extra_body={
-                "provider": _ROUTING_GUARD,
-                "reasoning": _openrouter_reasoning(settings.reasoning),
-            },
-            timeout=_REQUEST_TIMEOUT_SECONDS,
-            max_retries=_MAX_RETRIES,
-        ),
-        settings.debug,
+    return ChatOpenAI(
+        model=settings.model_id,
+        base_url=_OPENROUTER_BASE_URL,
+        api_key=SecretStr(key),
+        use_responses_api=False,
+        extra_body={
+            "provider": _ROUTING_GUARD,
+            "reasoning": _openrouter_reasoning(settings.reasoning),
+        },
+        timeout=_REQUEST_TIMEOUT_SECONDS,
+        max_retries=_MAX_RETRIES,
     )
 
 
 @dataclass(frozen=True, slots=True)
-class Provider:
-    """A registered provider: the model it uses unless overridden, and its port factory."""
+class ProviderAdapter:
+    """A registered provider: everything that varies between adapters, in one record.
+
+    Reading one entry tells you the whole adapter — the model it uses unless overridden, how it
+    constructs one, and which integration serves it. Adding a fourth provider is filling in this
+    record; nothing else in the module learns its name.
+    """
 
     default_model: str
-    build_port: PortFactory
+    build_model: ModelBuilder
+    integration: Integration
+
+    def build_port(self, settings: PortSettings) -> ExtractionPort:
+        """Construct the extraction port, or fail before anything is sent.
+
+        The prompt, the debug dump, and outcome classification are invariant across providers,
+        so they live here once. The model is built now and the schema is bound per call, because
+        only the schema arrives with the document.
+        """
+        model = self.build_model(settings)
+        integration = self.integration
+
+        def extract(document: str, schema: type[BaseModel]) -> Extraction:
+            return integration.call(
+                _PROMPT | integration.bind(model, schema), document, settings.debug
+            )
+
+        return extract
 
 
-PROVIDERS: dict[str, Provider] = {
-    "openai": Provider("gpt-5-nano", build_openai_port),
+PROVIDERS: dict[str, ProviderAdapter] = {
+    "openai": ProviderAdapter("gpt-5-nano", _build_openai_model, OPENAI_FAMILY),
     # Deliberately not a Haiku tier: Haiku 4.5 and Sonnet 4.5 reject the effort parameter
     # server-side, which would make the default reasoning level fail on every run.
-    "anthropic": Provider("claude-sonnet-5", build_anthropic_port),
+    "anthropic": ProviderAdapter("claude-sonnet-5", _build_anthropic_model, ANTHROPIC),
     # Deliberately a model also reachable directly, so comparing the two paths isolates
-    # routing rather than changing two variables at once.
-    "openrouter": Provider("openai/gpt-5-nano", build_openrouter_port),
+    # routing rather than changing two variables at once. It shares OpenAI's integration,
+    # which the registry now states rather than leaving to a shared builder's name.
+    "openrouter": ProviderAdapter("openai/gpt-5-nano", _build_openrouter_model, OPENAI_FAMILY),
 }
 DEFAULT_PROVIDER = next(iter(PROVIDERS))

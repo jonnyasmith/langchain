@@ -19,15 +19,14 @@ from extractor.extraction import (
     ExtractionPort,
     PortFactory,
     PortSettings,
-    Provider,
     ProviderFailure,
     ProviderRejectedRequest,
     ReasoningLevel,
     Refusal,
     ValidationFailure,
-    build_openai_port,
 )
 from extractor.schemas import TermsOfService
+from tests.staging import StagedProvider
 
 
 class CliResult(NamedTuple):
@@ -95,7 +94,7 @@ def run_cli(
     exit_code = main(
         argv,
         stdin=StringIO(source),
-        providers={provider: Provider(PROVIDERS[provider].default_model, port_factory)},
+        providers={provider: StagedProvider(PROVIDERS[provider].default_model, port_factory)},
     )
     captured = capsys.readouterr()
     return CliResult(exit_code, captured.out, captured.err)
@@ -335,7 +334,7 @@ def test_a_missing_api_key_is_a_named_configuration_error(
         capsys,
         ["--schema", "tos", "-"],
         source="source",
-        port_factory=build_openai_port,
+        port_factory=PROVIDERS[DEFAULT_PROVIDER].build_port,
     )
 
     assert result.exit_code == ExitCode.FAILURE

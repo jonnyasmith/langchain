@@ -29,17 +29,17 @@ from extractor.extraction import (
     Extraction,
     ExtractionPort,
     PortSettings,
-    Provider,
     ProviderFailure,
     ProviderRejectedRequest,
     ReasoningLevel,
 )
 from extractor.schemas import TermsOfService
+from tests.staging import StagedProvider
 
 FIXTURE = Path(__file__).parent / "fixtures" / "terms.html"
 
 
-def _staged(outcome: Extraction) -> Provider:
+def _staged(outcome: Extraction) -> StagedProvider:
     """A registry entry whose port returns one prepared live-test outcome."""
 
     def factory(_settings: PortSettings) -> ExtractionPort:
@@ -48,7 +48,7 @@ def _staged(outcome: Extraction) -> Provider:
 
         return extract
 
-    return Provider(PROVIDERS[DEFAULT_PROVIDER].default_model, factory)
+    return StagedProvider(PROVIDERS[DEFAULT_PROVIDER].default_model, factory)
 
 
 def _require_live_success(exit_code: ExitCode, stderr: str) -> None:
@@ -72,8 +72,8 @@ def _require_configured(name: str) -> None:
     reasons only under `-rs`, so the warning carries the reason into the warnings summary.
     The adapter owns the definition of "configured", so asking it cannot drift from the code
     this guards, and each provider is asked only about its own key. Called inside the test
-    rather than at collection so a default offline run never asks, and `_load_env_file` does
-    not write a key into `os.environ` during a run that never intended to call a provider.
+    rather than at collection so a default offline run never asks, and `required_key` does not
+    write a key into `os.environ` during a run that never intended to call a provider.
     """
     provider = PROVIDERS[name]
     try:
