@@ -299,9 +299,8 @@ def test_a_missing_input_file_is_reported_as_an_input_error(
 
     assert result.exit_code == ExitCode.FAILURE
     assert result.stdout == ""
-    assert "input file" in result.stderr.lower()
-    assert str(missing) in result.stderr
-    assert "validation failure" not in result.stderr.lower()
+    # `main` owns this wording; `intake` returns the facts only.
+    assert result.stderr == f"Input file error for {str(missing)!r}: No such file or directory.\n"
 
 
 def test_an_unreadable_input_path_is_reported_as_an_input_error(
@@ -319,7 +318,7 @@ def test_a_missing_api_key_is_a_named_configuration_error(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setattr("extractor.extraction.load_dotenv", lambda _: False)
+    monkeypatch.setattr("extractor.extraction._load_env_file", lambda _: None)
 
     result = run_cli(
         capsys,
@@ -343,8 +342,9 @@ def test_an_oversize_document_is_refused_before_calling_the_model(
 
     assert result.exit_code == ExitCode.FAILURE
     assert result.stdout == ""
-    assert "100,000" in result.stderr
-    assert "100,001" in result.stderr
+    assert result.stderr == (
+        "Document too large: maximum is 100,000 characters; received 100,001 characters.\n"
+    )
 
 
 def test_the_documented_exit_numbers_are_pinned() -> None:

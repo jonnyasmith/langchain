@@ -16,7 +16,7 @@ from extractor.extraction import (
     ValidationFailure,
     build_openai_port,
 )
-from extractor.intake import InputFailure, load_source_document
+from extractor.intake import OversizeDocument, UnreadableSource, load_source_document
 from extractor.schemas import SCHEMAS
 
 
@@ -82,6 +82,25 @@ def _report(outcome: Extraction) -> ExitCode:
             assert_never(unreachable)
 
 
+def _report_intake(failure: UnreadableSource | OversizeDocument) -> ExitCode:
+    """Write an intake failure's diagnostic and return the exit code it earns.
+
+    Both members share `FAILURE`, per the `ExitCode` docstring; only the wording differs.
+    `assert_never` makes a new intake failure a type error rather than a silent no-op.
+    """
+    match failure:
+        case UnreadableSource(spec=spec, detail=detail):
+            sys.stderr.write(f"Input file error for {spec!r}: {detail}.\n")
+        case OversizeDocument(characters=characters, ceiling=ceiling):
+            sys.stderr.write(
+                f"Document too large: maximum is {ceiling:,} characters; "
+                f"received {characters:,} characters.\n"
+            )
+        case unreachable:
+            assert_never(unreachable)
+    return ExitCode.FAILURE
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -101,9 +120,8 @@ def main(
         sys.stderr.write(f"Unknown schema {args.schema!r}. Valid schemas: {valid_names}.\n")
         return ExitCode.FAILURE
     document = load_source_document(args.input, stdin)
-    if isinstance(document, InputFailure):
-        sys.stderr.write(document.message + "\n")
-        return ExitCode.FAILURE
+    if not isinstance(document, str):
+        return _report_intake(document)
     try:
         extract = port_factory(args.model, sys.stderr if args.debug else None)
         outcome = extract(document, schema)

@@ -57,7 +57,7 @@ Outside the boundary: the OpenAI service, the filesystem the document is read fr
    checking at the match instead of falling through at runtime. See ADR-0002.
 
 3. **A document returned by intake has already cleared the ceiling.** `load_source_document`
-   returns `str | InputFailure`, and the `str` branch is only reachable after the
+   returns `Intake`, and the `str` branch is only reachable after the
    `MAX_DOCUMENT_CHARACTERS` check. Enforced by the return type, not by call ordering in
    `main`.
 
@@ -90,14 +90,15 @@ and the top-level error net. It does not own how a document is read, what the sc
 how the provider is called. It never imports LangChain or OpenAI.
 
 **`intake.py`** owns reading stdin or a UTF-8 file, the 100,000-character ceiling, and the
-rendered `InputFailure` message. It does not own classifying why the read failed into named
-causes; there is one caller and it just prints the message. It is deliberately not a seam.
+classification of a refusal into `UnreadableSource` or `OversizeDocument`. It does not own the
+wording of either report: failures carry their facts and `__main__` renders them, the same
+split `extraction.py` and `_report` use. It is deliberately not a seam.
 
 **`schemas.py`** owns the named schema registry (`SCHEMAS`, currently one entry, `tos`) and the
 field descriptions, which are prompt surface as well as validation. It does not own schema
 selection or error reporting.
 
-**`extraction.py`** owns everything provider-shaped: `load_dotenv`, the `ChatOpenAI`
+**`extraction.py`** owns everything provider-shaped: `_load_env_file`, the `ChatOpenAI`
 construction, the `ChatPromptTemplate`, `with_structured_output(..., method="json_schema",
 strict=True, include_raw=True)`, the debug dump, the exception-to-outcome mapping, and the six
 outcome dataclasses. It also declares `ExtractionPort` even though `__main__` is the consumer,
@@ -117,8 +118,8 @@ which is how every CLI test reaches `main` without a provider.
 2. Missing `--schema` or missing input path writes an input error and returns `FAILURE`.
 3. An unrecognised schema name writes the valid names and returns `FAILURE`. No provider call
    happens, and no document is read.
-4. `load_source_document` reads stdin or the file. An `InputFailure` is printed and returns
-   `FAILURE`.
+4. `load_source_document` reads stdin or the file. Anything that is not a `str` goes to
+   `_report_intake`, which writes the diagnostic and returns `FAILURE`.
 5. `port_factory(model_id, debug_stream)` runs. `build_openai_port` loads
    `extractor/.env`, raises `ConfigurationError` if `OPENAI_API_KEY` is absent, then constructs
    `ChatOpenAI(reasoning_effort="none", temperature=0, timeout=60, max_retries=2)` and the
@@ -185,7 +186,8 @@ There is no identity or authorization inside the tool. It runs with the invoking
 permissions and reads whatever path they pass.
 
 The API key is the one secret. It is read from the process environment or `extractor/.env` by
-`load_dotenv` inside `build_openai_port`, never at import time. A missing key raises
+`_load_env_file` inside `build_openai_port`, never at import time. An exported variable wins
+over the file, so a stale `.env` cannot shadow the shell. A missing key raises
 `ConfigurationError` before the model is constructed, so no call is attempted without one. The
 key is never written to stdout or stderr.
 
@@ -226,7 +228,7 @@ pytest`. There is no task runner and the module forbids adding one.
 - `tests/test_extraction.py` covers the adapter's classification of parsed objects, empty
   answers, schema rejections, refusals from both the raw message and a raised exception, the
   debug stream branches, the model configuration, the missing-key failure, the strict binding
-  arguments, and the dotenv path.
+  arguments, and the `.env` path including its precedence against an exported key.
 - `tests/test_cli.py` covers each outcome's exit code and stderr line through a staged port,
   the input and configuration paths, and pins the exit numbers directly.
 - `tests/test_live.py` is the only test that lets the real provider enforce the schema. It is
@@ -265,9 +267,9 @@ Unverified:
 
 | File | What it defines |
 | --- | --- |
-| `src/extractor/__main__.py` | Entry point, `ExitCode`, argument parsing, `_report`, the exhaustive match |
+| `src/extractor/__main__.py` | Entry point, `ExitCode`, argument parsing, `_report`, `_report_intake`, the exhaustive matches |
 | `src/extractor/extraction.py` | The `Extraction` union, `ExtractionPort`, `PortFactory`, `build_openai_port`, all provider vocabulary |
-| `src/extractor/intake.py` | `load_source_document`, `InputFailure`, `MAX_DOCUMENT_CHARACTERS` |
+| `src/extractor/intake.py` | `load_source_document`, the `Intake` union, `MAX_DOCUMENT_CHARACTERS` |
 | `src/extractor/schemas.py` | `TermsOfService`, the `SCHEMAS` registry |
 | `pyproject.toml` | Dependencies, dev group, ruff, mypy strict, pytest markers and default deselection |
 | `AGENTS.md` | Verification commands and module-level prohibitions |

@@ -6,10 +6,22 @@ MAX_DOCUMENT_CHARACTERS = 100_000
 
 
 @dataclass(frozen=True, slots=True)
-class InputFailure:
-    """Intake refused the spec. `message` is the rendered report, with no trailing newline."""
+class UnreadableSource:
+    """The spec named something intake could not read as UTF-8 text."""
 
-    message: str
+    spec: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class OversizeDocument:
+    """The source read cleanly, but it exceeds the character ceiling."""
+
+    characters: int
+    ceiling: int
+
+
+type Intake = str | UnreadableSource | OversizeDocument
 
 
 def _detail(error: OSError | UnicodeDecodeError) -> str:
@@ -19,23 +31,17 @@ def _detail(error: OSError | UnicodeDecodeError) -> str:
     return str(error)
 
 
-def load_source_document(spec: str, stdin: TextIO) -> str | InputFailure:
+def load_source_document(spec: str, stdin: TextIO) -> Intake:
     """Read the source document named by `spec`, or name why there is none to extract from.
 
     `spec` is `-` for stdin, otherwise a filesystem path read as UTF-8. A returned `str` has
     already cleared the character ceiling, so no caller can proceed with an oversize document.
+    Failures carry their facts rather than prose; `__main__` renders them.
     """
     try:
         document = stdin.read() if spec == "-" else Path(spec).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as error:
-        return InputFailure(message=f"Input file error for {spec!r}: {_detail(error)}.")
-    document_size = len(document)
-    if document_size > MAX_DOCUMENT_CHARACTERS:
-        return InputFailure(
-            message=(
-                "Document too large: "
-                f"maximum is {MAX_DOCUMENT_CHARACTERS:,} characters; "
-                f"received {document_size:,} characters."
-            )
-        )
+        return UnreadableSource(spec=spec, detail=_detail(error))
+    if len(document) > MAX_DOCUMENT_CHARACTERS:
+        return OversizeDocument(characters=len(document), ceiling=MAX_DOCUMENT_CHARACTERS)
     return document

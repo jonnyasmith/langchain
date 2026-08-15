@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, TextIO, TypedDict, cast
 
-from dotenv import load_dotenv
 from langchain_core.messages import BaseMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
@@ -88,9 +87,29 @@ class ExtractionPort(Protocol):
 type PortFactory = Callable[[str, TextIO | None], ExtractionPort]
 
 
+def _load_env_file(path: Path) -> None:
+    """Define any `KEY=value` the file declares that the environment does not already set.
+
+    Ten lines rather than a dependency, per the coding standards. An exported variable always
+    wins, so a stale file cannot shadow the shell. No interpolation, `export` prefixes, or
+    multi-line values: the extractor reads one key.
+    """
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        entry = line.strip()
+        if not entry or entry.startswith("#") or "=" not in entry:
+            continue
+        key, _, value = entry.partition("=")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        os.environ.setdefault(key.strip(), value)
+
+
 def build_openai_port(model_id: str, debug: TextIO | None) -> ExtractionPort:
     """Build the OpenAI-backed extraction port, or fail if it cannot be configured."""
-    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+    _load_env_file(Path(__file__).resolve().parents[2] / ".env")
     if not os.getenv("OPENAI_API_KEY"):
         raise ConfigurationError("missing OPENAI_API_KEY; set it in extractor/.env")
     model = ChatOpenAI(
